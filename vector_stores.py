@@ -1,31 +1,411 @@
 """
-向量库创建，检索器获取
+检索基础设施：
+
+1. Chroma 向量检索
+2. BM25 关键词检索
+3. RRF 混合检索
+4. DashScope Reranker 重排序
 """
 
+import hashlib
+
+import jieba
+import dashscope
+
 from langchain_chroma import Chroma
-import config_data as config
 from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_community.retrievers import BM25Retriever
+from langchain_core.documents import Document
+
+import config_data as config
 
 
-#-----------------------Rag的检索基础设施(Chroma创建，Retriever获取)---------------------
 class VectorStoreService(object):
-    def __init__(self,embedding):
-        self.embedding = embedding  # rag.py传入Embedding模型
-    #-----------Chroma 向量数据库 (主要负责检索)--------------------------
-        self.vector_store = Chroma(
-            collection_name=config.collection_name, # Chroma里的一个知识库集合
-            embedding_function=self.embedding,
-            persist_directory=config.persist_directory, # Chroma把数据持久化到‘./chroma_db’
 
+    def __init__(self, embedding):
+
+        self.embedding = embedding
+
+        # =========================
+        # 1. Chroma 向量数据库
+        # =========================
+
+        self.vector_store = Chroma(
+            collection_name=config.collection_name,
+            embedding_function=self.embedding,
+            persist_directory=config.persist_directory,
         )
 
-    def get_retriever(self):
-        return self.vector_store.as_retriever(search_kwargs={"k":config.similarity_threshold})
+        # =========================
+        # 2. 构建 BM25 检索器
+        # =========================
+
+        self.bm25_retriever = self._build_bm25_retriever()
+
+# =========================================================
+# 获取向量检索器
+# =========================================================
+
+    def get_vector_retriever(self):
+        return self.vector_store.as_retriever(
+            search_kwargs={"k": config.vector_top_k}
+        )
+
+# =========================================================
+# 从 Chroma 获取全部 Document，供BM25检索
+# =========================================================
+
+    def _get_all_documents(self):
+
+        data = self.vector_store.get()
+
+        documents = data.get("documents", [])
+        metadatas = data.get("metadatas", [])
+
+        result = []
+
+        for i, page_content in enumerate(documents):
+
+            metadata = {}
+
+            if i < len(metadatas):
+                metadata = metadatas[i] or {}
+
+            result.append(
+                Document(
+                    page_content=page_content,
+                    metadata=metadata,
+                )
+            )
+
+        return result
 
 
-# ----------------------------测试----------------------------------
+# =========================================================
+# 构建 BM25 检索器
+# =========================================================
+
+    def _build_bm25_retriever(self):
+
+        documents = self._get_all_documents()
+
+        if not documents:
+            return None
+
+        # 中文分词
+        def chinese_tokenizer(text):
+            return list(jieba.cut(text))
+
+        retriever = BM25Retriever.from_documents(
+            documents,
+            preprocess_func = chinese_tokenizer
+        )
+
+        retriever.k = config.bm25_top_k
+
+        return retriever
+
+# =========================================================
+# 获取 BM25 检索器
+# =========================================================
+
+    def get_bm25_retriever(self):
+
+        return self.bm25_retriever
+
+# =========================================================
+# 根据 Document 内容生成唯一临时ID ，供RRF识别去重
+# =========================================================
+
+    def _get_document_id(self, doc):
+
+        content = doc.page_content
+
+        source = doc.metadata.get("source", "")
+
+        raw = source + content  # 使用source + page_content 生成MD5唯一标识
+
+        return hashlib.md5(
+            raw.encode("utf-8")
+        ).hexdigest()
+
+# =========================================================
+# 使用 RRF 对向量检索和 BM25 检索结果进行融合
+# =========================================================
+    def _rrf_fusion(self, vector_docs, bm25_docs, k=60):
+
+        scores = {}
+        documents = {}
+
+        # =========================
+        # 处理向量检索结果，Vector 排名
+        # =========================
+
+        for rank, doc in enumerate(vector_docs, start=1):
+            doc_id = self._get_document_id(doc)
+
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank) # RRF公式
+
+            documents[doc_id] = doc
+
+        # =========================
+        # 处理 BM25 检索结果，BM25 排名
+        # =========================
+
+        for rank, doc in enumerate(bm25_docs, start=1):
+            doc_id = self._get_document_id(doc)
+
+            scores[doc_id] = scores.get(doc_id, 0) + 1 / (k + rank)
+
+            documents[doc_id] = doc
+
+        # =========================
+        # 根据 RRF 分数排序
+        # =========================
+
+        sorted_ids = sorted(
+            scores,
+            key=scores.get,
+            reverse=True
+        )
+        # -------------------------
+        # 返回 Top K
+        # -------------------------
+        results = []
+
+        for doc_id in sorted_ids[ :config.rrf_top_k]:
+            results.append(
+                documents[doc_id]
+            )
+
+        return results
+
+# =========================================================
+# Reranker 重排
+# =========================================================
+    def rerank(self,query,documents):
+
+        if not documents:
+            return []
+
+        # 提取文本
+        document_texts = [
+            doc.page_content
+            for doc in documents
+        ]
+
+        print("\n========== Reranker ==========")
+
+        print(
+            f"Query: {query}"
+        )
+
+        print(
+            f"候选文档数量: {len(document_texts)}"
+        )
+
+        # -------------------------
+        # 调用 DashScope Rerank
+        # -------------------------
+
+        response = dashscope.TextReRank.call(
+            model=config.rerank_model_name,
+            query=query,
+            documents=document_texts,
+            top_n=config.rerank_top_k,
+            instruct=(
+                "Given a user query, "
+                "retrieve relevant passages "
+                "that answer the query."
+            )
+        )
+
+        # -------------------------
+        # 判断请求是否成功
+        # -------------------------
+
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Reranker 调用失败: "
+                f"{response}"
+            )
+
+        # -------------------------
+        # 获取排序结果
+        # -------------------------
+
+        results = response.output.results
+
+        reranked_documents = []
+
+        for result in results:
+            index = result["index"]
+
+            score = result[
+                "relevance_score"
+            ]
+
+            doc = documents[index]
+
+            print(
+                f"\nRerank Score: {score:.4f}"
+            )
+
+            print(
+                f"来源: "
+                f"{doc.metadata.get('source')}"
+            )
+
+            print(
+                f"页码: "
+                f"{doc.metadata.get('page')}"
+            )
+
+            print(
+                f"内容: "
+                f"{doc.page_content[:200]}"
+            )
+
+            reranked_documents.append(
+                doc
+            )
+
+        return reranked_documents
+
+# =========================================================
+# 混合检索实现
+# =========================================================
+    def hybrid_search(self, query):
+
+        # =====================================================
+        # vector
+        # =====================================================
+        print(
+            "\n========== Vector Retrieval =========="
+        )
+        vector_retriever = self.get_vector_retriever()
+
+        vector_docs = (
+            vector_retriever.invoke(query)
+        )
+
+        print(
+            f"Vector 返回 "
+            f"{len(vector_docs)} 个文档"
+        )
+
+        # =====================================================
+        # BM25
+        # =====================================================
+        print(
+            "\n========== BM25 Retrieval =========="
+        )
+
+        bm25_retriever = self.get_bm25_retriever()
+
+        if bm25_retriever is None:
+            print(
+                "BM25 没有可用文档，"
+                "直接使用 Vector 结果"
+            )
+            return vector_docs
+
+        bm25_docs = bm25_retriever.invoke(query)
+
+        print(
+            f"BM25 返回 "
+            f"{len(bm25_docs)} 个文档"
+        )
+
+        # =====================================================
+        # RRF
+        # =====================================================
+
+        print(
+            "\n========== RRF Fusion =========="
+        )
+
+        fused_docs = self._rrf_fusion(
+            vector_docs,
+            bm25_docs
+        )
+
+        print(
+            f"RRF 返回 "
+            f"{len(fused_docs)} 个候选文档"
+        )
+
+        # =====================================================
+        # Reranker
+        # =====================================================
+        reranked_docs = self.rerank(
+            query,
+            fused_docs
+        )
+        print(
+            "\n========== Hybrid Search Finished =========="
+        )
+
+        print(
+            f"最终返回 "
+            f"{len(reranked_docs)} 个文档"
+        )
+
+        return reranked_docs
+
+# =========================================================
+# 测试
+# =========================================================
+
 if __name__ == "__main__":
-    retriever = VectorStoreService(DashScopeEmbeddings(model=config.embedding_model_name)).get_retriever()
 
-    res = retriever.invoke("我的体重180斤，尺码推荐")
-    print(res)
+    service = VectorStoreService(
+        DashScopeEmbeddings(
+            model=config.embedding_model_name
+        )
+    )
+
+    query = (
+        "简单介绍下基于C++构建ZRDDS的方式"  # 示例
+    )
+
+    results = service.hybrid_search(
+        query
+    )
+
+    print(
+        "\n\n"
+        "======================================"
+    )
+
+    print(
+        "最终 Reranker 检索结果"
+    )
+
+    print(
+        "======================================"
+    )
+
+    for i, doc in enumerate(
+            results,
+            start=1
+    ):
+        print(
+            f"\n--- Final Result {i} ---"
+        )
+
+        print(
+            "内容："
+        )
+
+        print(
+            doc.page_content
+        )
+
+        print(
+            "Metadata："
+        )
+
+        print(
+            doc.metadata
+        )

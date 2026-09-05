@@ -123,5 +123,5 @@ class KnowledgeBaseService(object):
 
 if __name__ == '__main__':
     service = KnowledgeBaseService()
-    r = service.upload_by_str("苏小虎","testFile")
+    r = service.upload_documents("苏小虎","testFile")
     print(r)

@@ -36,59 +36,78 @@ class RagService(object):
         self.chain = self._get_chain()
 
     def _get_chain(self):
-        #-----------向量数据库获取一个retriever,负责检索-----------------------
-        retriever = self.vector_service.get_retriever()
+        def format_document(docs: list[Document]):
 
-        #-----------将retriever返回的List[document]——> str字符串 -------------------
-        def format_document(docs:list[Document]):
             if not docs:
                 return "无相关资料"
 
             formatted_str = ""
+
             for doc in docs:
-                formatted_str += f"文档片段：{doc.page_content}\n文档元数据：{doc.metadata}\n\n"
-            # ----------提取 page_content 和 metadata 拼接成字符串 -----------------
+                formatted_str += (
+                    f"文档片段：{doc.page_content}\n"
+                    f"文档元数据：{doc.metadata}\n\n"
+                )
+
             return formatted_str
 
-        #--------输入：“用户问题 + 对话历史” ——> 输出：用户问题 ——> retriever ------------
         def format_for_retriever(value: dict) -> str:
             return value["input"]
 
-        #--------把复杂输入（历史会话 + 检索内容）转化成Prompt需要的结构-----------------------------
         def format_for_prompt_template(value):
-            # value结构：{"input":{"input":"xxx","history":[...]} , "context":"检索出来的参考资料字符串"}
+
             new_value = {}
-            new_value["input"] = value["input"]["input"]  # 当前用户问题
-            new_value["context"] = value["context"]  # 检索得到的参考资料
-            new_value["history"] = value["input"]["history"]  # 对话历史消息
+
+            new_value["input"] = value["input"]["input"]
+
+            new_value["context"] = value["context"]
+
+            new_value["history"] = value["input"]["history"]
+
             return new_value
 
         def print_prompt(prompt):
             print("=" * 50)
-            print(prompt.to_string())
+            print("Prompt 已生成")
+            print(f"Prompt 字符数：{len(prompt.to_string())}")
             print("=" * 50)
             return prompt
 
         chain = (
                 {
                     "input": RunnablePassthrough(),
-                    "context": RunnableLambda(format_for_retriever) | retriever | format_document
+
+                    "context": (
+                            RunnableLambda(format_for_retriever)
+                            | RunnableLambda(
+                        self.vector_service.hybrid_search
+                    )
+                            | RunnableLambda(format_document)
+                    )
                 }
+
                 | RunnableLambda(format_for_prompt_template)
+
                 | self.prompt_template
+
                 | print_prompt
+
                 | self.chat_model
+
+                | StrOutputParser()
         )
+
         conversation_chain = RunnableWithMessageHistory(
             chain,
             get_history,
             input_messages_key="input",
             history_messages_key="history",
         )
+
         return conversation_chain
 
 #测试
 if __name__ == "__main__":
 
-    res = RagService().chain.invoke({"input":"简单介绍下ZRDDS"},config.session_config)
+    res = RagService().chain.invoke({"input":"简单介绍下基于C++构建ZRDDS的方式"},config.session_config)
     print(res)
