@@ -8,16 +8,24 @@
 """
 
 import hashlib
+import re
 
-import jieba
 import dashscope
 
 from langchain_chroma import Chroma
-from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
 
 import config_data as config
+
+
+def tokenize_for_bm25(text):
+    """中文按单字、英文数字/API 符号按词切分，适配技术文档检索。"""
+    return re.findall(
+        r"[a-zA-Z_][a-zA-Z0-9_:~]*|[0-9]+|[\u4e00-\u9fff]",
+        text.lower(),
+    )
 
 
 class VectorStoreService(object):
@@ -92,13 +100,9 @@ class VectorStoreService(object):
         if not documents:
             return None
 
-        # 中文分词
-        def chinese_tokenizer(text):
-            return list(jieba.cut(text))
-
         retriever = BM25Retriever.from_documents(
             documents,
-            preprocess_func = chinese_tokenizer
+            preprocess_func=tokenize_for_bm25
         )
 
         retriever.k = config.bm25_top_k
@@ -119,9 +123,18 @@ class VectorStoreService(object):
 
     def _get_document_id(self, doc):
 
-        content = doc.page_content
-
         source = doc.metadata.get("source", "")
+        chunk_id = doc.metadata.get("chunk_id")
+
+        if chunk_id not in (None, "", "unknown"):
+            return f"{source}#{chunk_id}"
+
+        source_chunk_id = doc.metadata.get("source_chunk_id")
+
+        if source_chunk_id not in (None, "", "unknown"):
+            return str(source_chunk_id)
+
+        content = doc.page_content
 
         raw = source + content  # 使用source + page_content 生成MD5唯一标识
 
@@ -132,7 +145,10 @@ class VectorStoreService(object):
 # =========================================================
 # 使用 RRF 对向量检索和 BM25 检索结果进行融合
 # =========================================================
-    def _rrf_fusion(self, vector_docs, bm25_docs, k=60):
+    def _rrf_fusion(self, vector_docs, bm25_docs, k=None):
+
+        if k is None:
+            k = config.rrf_const
 
         scores = {}
         documents = {}
@@ -183,7 +199,7 @@ class VectorStoreService(object):
 # =========================================================
 # Reranker 重排
 # =========================================================
-    def rerank(self,query,documents):
+    def rerank(self, query, documents):
 
         if not documents:
             return []
@@ -273,6 +289,53 @@ class VectorStoreService(object):
         return reranked_documents
 
 # =========================================================
+# 向量检索实现
+# =========================================================
+    def vector_search(self, query):
+
+        print(
+            "\n========== Vector Retrieval =========="
+        )
+
+        vector_docs = self.vector_store.similarity_search(
+            query,
+            k=config.vector_top_k,
+        )
+
+        print(
+            f"Vector 返回 "
+            f"{len(vector_docs)} 个文档"
+        )
+
+        reranked_docs = self.rerank(
+            query,
+            vector_docs
+        )
+
+        print(
+            "\n========== Vector Search Finished =========="
+        )
+
+        print(
+            f"最终返回 "
+            f"{len(reranked_docs)} 个文档"
+        )
+
+        return reranked_docs
+
+# =========================================================
+# 统一检索入口
+# =========================================================
+    def search(self, query, mode=None):
+
+        current_mode = mode or config.default_retrieval_mode
+
+        if current_mode == "vector":
+            return self.vector_search(query)
+
+        return self.hybrid_search(query)
+
+# =========================================================
 # 混合检索实现
 # =========================================================
     def hybrid_search(self, query):
@@ -358,19 +421,32 @@ class VectorStoreService(object):
 # =========================================================
 
 if __name__ == "__main__":
+    import sys
 
     service = VectorStoreService(
-        DashScopeEmbeddings(
-            model=config.embedding_model_name
+        OllamaEmbeddings(
+            model=config.embedding_model_name,
+            base_url=config.ollama_base_url,
         )
     )
 
-    query = (
-        "简单介绍下基于C++构建ZRDDS的方式"  # 示例
-    )
+    args = sys.argv[1:]
+    mode = "hybrid"
 
-    results = service.hybrid_search(
-        query
+    if "--vector" in args:
+        mode = "vector"
+        args.remove("--vector")
+    elif "--hybrid" in args:
+        mode = "hybrid"
+        args.remove("--hybrid")
+
+    query = " ".join(args).strip()
+    if not query:
+        query = "简单介绍下基于C++构建ZRDDS的方式"
+
+    results = service.search(
+        query,
+        mode=mode,
     )
 
     print(
@@ -379,7 +455,7 @@ if __name__ == "__main__":
     )
 
     print(
-        "最终 Reranker 检索结果"
+        f"最终 Reranker 检索结果 [{mode}]"
     )
 
     print(

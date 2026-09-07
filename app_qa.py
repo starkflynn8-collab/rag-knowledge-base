@@ -28,8 +28,9 @@ if prompt:
 
     def capture(generator, cache_list):
         for chunk in generator:
-            cache_list.append(chunk.content) # 保存答案到session_state
-            yield chunk.content # 实时输出
+            text = chunk.content if hasattr(chunk, "content") else str(chunk)
+            cache_list.append(text) # 保存答案到session_state
+            yield text # 实时输出
 
 
     with st.chat_message("assistant"):

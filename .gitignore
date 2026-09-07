@@ -1,67 +1,40 @@
-# =========================
 # Python
-# =========================
-
 __pycache__/
 *.py[cod]
 *.pyo
 
-# =========================
-# Virtual Environment
-# =========================
-
-venv/
+# Virtual env
 .venv/
+venv/
 env/
 
-# =========================
-# Environment Variables
-# =========================
-
+# Environment
 .env
 .env.*
 !.env.example
 
-# =========================
 # IDE
-# =========================
-
 .idea/
 .vscode/
 
-# =========================
 # Streamlit
-# =========================
-
 .streamlit/secrets.toml
 
-# =========================
-# RAG Local Data
-# =========================
 
-chroma_db/
-chroma/
-vector_db/
 
-chat_history/
-
-# =========================
-# Uploaded / Temporary Files
-# =========================
-
+# Upload / temp / local data
 uploads/
 temp/
 tmp/
+data/
 
-# =========================
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
 # OS
-# =========================
-
 .DS_Store
 Thumbs.db
 
-# =========================
 # Logs
-# =========================
-
 *.log

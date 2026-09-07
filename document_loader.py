@@ -8,8 +8,8 @@ from langchain_community.document_loaders import (
     TextLoader,
     Docx2txtLoader,
     CSVLoader,
-    BSHTMLLoader,
 )
+from corpus_cleaner import load_html
 
 
 class DocumentLoaderService:
@@ -56,5 +56,4 @@ class DocumentLoaderService:
         return loader.load()
 
     def _load_html(self, file_path):
-        loader = BSHTMLLoader(file_path)
-        return loader.load()
+        return load_html(Path(file_path))

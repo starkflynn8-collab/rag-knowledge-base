@@ -21,8 +21,14 @@ vector_top_k = 10
 bm25_top_k = 10
 rrf_top_k = 10
 rerank_top_k = 5
+rrf_const = 60
+default_retrieval_mode = "hybrid"
 
-embedding_model_name = "text-embedding-v4"
+embedding_provider = "ollama"
+embedding_model_name = "bge-m3"
+ollama_base_url = "http://localhost:11434"
+embedding_batch_size = 4
+
 chat_model_name = "qwen3-max"
 rerank_model_name = "qwen3-rerank"
 

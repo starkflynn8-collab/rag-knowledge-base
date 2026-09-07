@@ -9,9 +9,10 @@ import config_data as config
 import hashlib
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_community.embeddings import DashScopeEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from datetime import datetime
+from corpus_cleaner import infer_doc_type, parse_version
 
 def check_md5(md5_str: str):
     """检查传入的md5字符串是否已经被处理过了
@@ -48,9 +49,12 @@ def get_string_md5(input_str: str, encoding='utf-8'):
 class KnowledgeBaseService(object):
     def __init__(self):
         self.chroma = Chroma(
-            collection_name=config.collection_name,  # 数据库的表名
-            embedding_function=DashScopeEmbeddings(model=config.embedding_model_name),
-            persist_directory=config.persist_directory,  # 数据库本地存储文件夹
+            collection_name=config.collection_name,
+            embedding_function=OllamaEmbeddings(
+                model=config.embedding_model_name,
+                base_url=config.ollama_base_url,
+            ),
+            persist_directory=config.persist_directory,
         )
         # 向量库构建，主要负责写入知识
         
@@ -67,6 +71,7 @@ class KnowledgeBaseService(object):
             documents: list[Document],
             filename: str,
             file_md5: str = None,
+            operator: str = "小虎",
     ) -> str:
 
         if not documents:
@@ -83,8 +88,13 @@ class KnowledgeBaseService(object):
         # 添加统一 Metadata
         # =========================
 
+        inferred_doc_type = infer_doc_type(filename)
+        version = parse_version(filename)
+
         for doc in documents:
             doc.metadata["source"] = filename
+            doc.metadata["doc_type"] = doc.metadata.get("doc_type", inferred_doc_type)
+            doc.metadata["version"] = doc.metadata.get("version", version)
 
             doc.metadata["create_time"] = (
                 datetime.now().strftime(
@@ -92,7 +102,7 @@ class KnowledgeBaseService(object):
                 )
             )
 
-            doc.metadata["operator"] = "小虎"
+            doc.metadata["operator"] = operator
 
         # =========================
         # Document → Chunk
@@ -102,11 +112,21 @@ class KnowledgeBaseService(object):
             documents
         )
 
+        for chunk_index, chunk in enumerate(chunks):
+            chunk.metadata["chunk_id"] = chunk_index
+            chunk.metadata["source_chunk_id"] = f"{filename}#{chunk_index}"
+            if chunk.metadata.get("page") is None:
+                chunk.metadata["page"] = "unknown"
+
         # =========================
         # Chunk → Embedding → Chroma
         # =========================
 
-        self.chroma.add_documents(chunks)
+        batch_size = max(1, int(config.embedding_batch_size))
+
+        for start in range(0, len(chunks), batch_size):
+            batch = chunks[start:start + batch_size]
+            self.chroma.add_documents(batch)
 
         # =========================
         # 保存 MD5
@@ -117,11 +137,29 @@ class KnowledgeBaseService(object):
 
         return (
             f"[成功]内容已成功载入向量库，"
-            f"共生成 {len(chunks)} 个文本块"
+            f"共生成 {len(chunks)} 个文本块，"
+            f"按每批 {batch_size} 个文本块写入"
         )
 
 
 if __name__ == '__main__':
+
     service = KnowledgeBaseService()
-    r = service.upload_documents("苏小虎","testFile")
-    print(r)
+
+    documents = [
+        Document(
+            page_content="ZRDDS是一种基于DDS标准的通信产品。",
+            metadata={}
+        ),
+        Document(
+            page_content="ZRDDS支持多种QoS策略。",
+            metadata={}
+        )
+    ]
+
+    result = service.upload_documents(
+        documents=documents,
+        filename="test.txt"
+    )
+
+    print(result)
