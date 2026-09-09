@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+﻿const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
 
 async function request(path, options = {}) {
   const response = await fetch(`${BASE_URL}${path}`, {
@@ -99,6 +99,10 @@ export function listDocuments(params = {}) {
   return request(`/api/documents${query ? `?${query}` : ''}`)
 }
 
+export function getDocumentPreview(sourcePath) {
+  const search = new URLSearchParams({ source_path: sourcePath })
+  return request(`/api/documents/preview?${search.toString()}`)
+}
 export function getDocumentStats() {
   return request('/api/documents/stats')
 }
@@ -121,9 +125,18 @@ export function batchIngest(payload) {
   })
 }
 
+export function listSessions() {
+  return request('/api/sessions')
+}
+
+export function getSessionHistory(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/history`)
+}
 export function clearHistory(sessionId) {
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/history`, {
     method: 'DELETE'
   })
 }
+
+
 
