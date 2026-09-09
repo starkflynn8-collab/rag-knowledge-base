@@ -225,26 +225,57 @@ class AppServices:
             "by_version": dict(sorted(by_version.items())),
         }
 
-    def _format_documents(self, documents: list[Document], include_text: bool = True) -> list[dict[str, Any]]:
-        result = []
+    #引用粒度分级方法
+    def _citation_granularity(self, score: float) -> str:
+        if score >= config.citation_granularity_thresholds["fine"]:
+            return "fine"
+        elif score >= config.citation_granularity_thresholds["medium"]:
+            return "medium"
+        else:
+            return "coarse"
+
+    def _format_documents(
+        self,
+        documents: list[Document],
+        include_text: bool = True,
+        scores: list[float] | None = None,
+    ) -> list[dict[str, Any]]:
+        raw = []
         for index, doc in enumerate(documents, start=1):
             metadata = doc.metadata or {}
+            score = scores[index - 1] if scores and index - 1 < len(scores) else None
+            granularity = self._citation_granularity(score) if score is not None else "coarse"
+
             citation = format_citation(metadata)
-            result.append(
-                {
-                    "index": index,
-                    "source": metadata.get("source", "未知来源"),
-                    "doc_type": metadata.get("doc_type", "unknown"),
-                    "version": metadata.get("version", "unknown"),
-                    "page": normalize_page(metadata.get("page")),
-                    "chunk_id": metadata.get("chunk_id", "unknown"),
-                    "source_chunk_id": metadata.get("source_chunk_id"),
-                    "citation": citation,
-                    "score": metadata.get("score"),
-                    "text": doc.page_content if include_text else None,
-                    "snippet": doc.page_content[:240],
-                }
-            )
+            if granularity == "medium":
+                source = metadata.get("source", "未知来源")
+                page = normalize_page(metadata.get("page"))
+                citation = f"{source} | p.{page}" if page != "unknown" else source
+
+            item = {
+                "index": index,
+                "source": metadata.get("source", "未知来源"),
+                "doc_type": metadata.get("doc_type", "unknown"),
+                "version": metadata.get("version", "unknown"),
+                "page": normalize_page(metadata.get("page")),
+                "chunk_id": metadata.get("chunk_id", "unknown"),
+                "source_chunk_id": metadata.get("source_chunk_id"),
+                "citation": citation,
+                "score": score,
+                "granularity": granularity,
+                "text": doc.page_content if include_text else None,
+                "snippet": doc.page_content[:240] if granularity != "coarse" else None,
+            }
+            raw.append(item)
+
+        seen_sources = set()
+        result = []
+        for item in raw:
+            if item["granularity"] == "coarse":
+                if item["source"] in seen_sources:
+                    continue
+                seen_sources.add(item["source"])
+            result.append(item)
         return result
 
     def _retrieve_raw(
@@ -253,23 +284,27 @@ class AppServices:
         retrieval_mode: str,
         k: int,
         rerank: bool = True,
-    ) -> list[Document]:
+    ) -> tuple[list[Document], list[float]]:
         vector_service = self.rag.vector_service
         limit = max(1, k)
 
         if retrieval_mode == "vector":
             docs = vector_service.vector_store.similarity_search(query, k=limit)
             if rerank:
-                docs = vector_service.rerank(query, docs)
-            return docs[:limit]
+                docs, scores = vector_service.rerank(query, docs)
+            else:
+                scores = []
+            return docs[:limit], scores[:limit]
 
         vector_docs = vector_service.vector_store.similarity_search(query, k=max(limit, config.vector_top_k))
         bm25_retriever = vector_service.get_bm25_retriever()
         if bm25_retriever is None:
             docs = vector_docs
             if rerank:
-                docs = vector_service.rerank(query, docs)
-            return docs[:limit]
+                docs, scores = vector_service.rerank(query, docs)
+            else:
+                scores = []
+            return docs[:limit], scores[:limit]
 
         old_k = bm25_retriever.k
         bm25_retriever.k = max(limit, config.bm25_top_k)
@@ -280,15 +315,18 @@ class AppServices:
 
         fused_docs = vector_service._rrf_fusion(vector_docs, bm25_docs, k=config.rrf_const)
         if rerank:
-            fused_docs = vector_service.rerank(query, fused_docs)
-        return fused_docs[:limit]
+            fused_docs, scores = vector_service.rerank(query, fused_docs)
+        else:
+            scores = []
+        return fused_docs[:limit], scores[:limit]
 
     def retrieve(self, query: str, retrieval_mode: str, k: int, rerank: bool = True) -> dict[str, Any]:
-        documents = self._retrieve_raw(query=query, retrieval_mode=retrieval_mode, k=k, rerank=rerank)
+        documents, scores = self._retrieve_raw(query=query, retrieval_mode=retrieval_mode, k=k, rerank=rerank)
         return {
             "query": query,
             "retrieval_mode": retrieval_mode,
-            "documents": self._format_documents(documents, include_text=True),
+            "top_rerank_score": scores[0] if scores else None,
+            "documents": self._format_documents(documents, include_text=True, scores=scores),
         }
 
     def build_context(self, documents: list[Document]) -> str:
@@ -308,7 +346,27 @@ class AppServices:
         return_context: bool = True,
     ) -> dict[str, Any]:
         start = datetime.now()
-        docs = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
+        docs, scores = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
+
+        #比较最高分与拒绝阈值，显式拒绝无法回答的问题
+        top_score = scores[0] if scores else 0.0
+        if top_score < config.refusal_score_threshold:
+            latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+            return {
+                "answer": "抱歉，当前知识库中没有足够相关的资料来回答该问题。",
+                "refused": True,
+                "refusal_score": top_score,
+                "session_id": session_id,
+                "retrieval_mode": retrieval_mode,
+                "citations": [],
+                "usage": {
+                    "prompt_tokens": None,
+                    "completion_tokens": None,
+                    "total_tokens": None,
+                },
+                "latency_ms": latency_ms,
+            }
+
         context = self.build_context(docs) if return_context else self.build_context(docs)
         answer_text = self.answer_chain.invoke(
             {"input": question, "context": context},
@@ -317,9 +375,10 @@ class AppServices:
         latency_ms = int((datetime.now() - start).total_seconds() * 1000)
         return {
             "answer": answer_text,
+            "refused": False,
             "session_id": session_id,
             "retrieval_mode": retrieval_mode,
-            "citations": self._format_documents(docs, include_text=return_context),
+            "citations": self._format_documents(docs, include_text=return_context, scores=scores),
             "usage": {
                 "prompt_tokens": None,
                 "completion_tokens": None,
@@ -336,13 +395,19 @@ class AppServices:
         top_k: int,
         return_context: bool = True,
     ):
-        docs = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
+        docs, scores = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
+
+        top_score = scores[0] if scores else 0.0
+        if top_score < config.refusal_score_threshold:
+            refusal_msg = "抱歉，当前知识库中没有足够相关的资料来回答该问题。"
+            return docs, scores, refusal_msg
+
         context = self.build_context(docs) if return_context else self.build_context(docs)
         answer = self.answer_chain.invoke(
             {"input": question, "context": context},
             {"configurable": {"session_id": session_id}},
         )
-        return docs, answer
+        return docs, scores, answer
 
     def upload_file(self, file_path: Path, original_name: str, operator: str = "小虎") -> dict[str, Any]:
         documents = self.loader.load(str(file_path))

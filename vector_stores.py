@@ -199,10 +199,10 @@ class VectorStoreService(object):
 # =========================================================
 # Reranker 重排
 # =========================================================
-    def rerank(self, query, documents):
-
+    def rerank(self, query, documents) -> tuple[list, list[float]]:
+        #重排方法签名修改，额外返回各chunk的重排得分，用于实现动态引用粒度以及与拒绝阈值比较
         if not documents:
-            return []
+            return [], []
 
         # 提取文本
         document_texts = [
@@ -254,6 +254,7 @@ class VectorStoreService(object):
         results = response["result"]["response"]
 
         reranked_documents = []
+        scores = []
 
         for result in results:
             index = result["id"]
@@ -286,8 +287,9 @@ class VectorStoreService(object):
             reranked_documents.append(
                 doc
             )
+            scores.append(score)
 
-        return reranked_documents
+        return reranked_documents, scores
 
 # =========================================================
 # 向量检索实现
@@ -308,7 +310,7 @@ class VectorStoreService(object):
             f"{len(vector_docs)} 个文档"
         )
 
-        reranked_docs = self.rerank(
+        reranked_docs, scores = self.rerank(
             query,
             vector_docs
         )
@@ -402,7 +404,7 @@ class VectorStoreService(object):
         # =====================================================
         # Reranker
         # =====================================================
-        reranked_docs = self.rerank(
+        reranked_docs, scores = self.rerank(
             query,
             fused_docs
         )

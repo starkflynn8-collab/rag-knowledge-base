@@ -25,6 +25,16 @@ rerank_top_k = 5
 rrf_const = 60
 default_retrieval_mode = "hybrid"
 
+#拒绝阈值：当rerank结果中最高得分低于这个阈值时判断本知识库无法回答该问题
+refusal_score_threshold = 0.3
+
+# 引用粒度阈值：分数越高，引用越精细
+citation_granularity_thresholds = {
+    "fine": 0.7,    # 精细：来源+页码+chunk_id+摘要
+    "medium": 0.4,  # 中等：来源+页码
+    # 低于 medium 则为 coarse（仅来源）
+}
+
 embedding_provider = "ollama"
 embedding_model_name = "bge-m3"
 ollama_base_url = "http://localhost:11434"

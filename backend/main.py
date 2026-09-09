@@ -19,6 +19,7 @@ from langchain_core.documents import Document as LCDocument
 from backend.schemas import BatchIngestRequest, ChatRequest, RetrieveRequest
 from backend.services import AppServices
 from config_data import default_retrieval_mode
+import config_data as config
 
 
 app = FastAPI(title="DDSRag v2 API", version="1.0")
@@ -125,7 +126,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
 
     def generate():
         try:
-            docs, answer = services.stream_answer(
+            docs, scores, answer = services.stream_answer(
                 question=payload.question,
                 session_id=payload.session_id,
                 retrieval_mode=payload.retrieval_mode or default_retrieval_mode,
@@ -133,14 +134,17 @@ async def chat_stream(payload: ChatRequest, request: Request):
                 return_context=payload.return_context,
             )
 
+            top_score = scores[0] if scores else 0.0
+            refused = top_score < config.refusal_score_threshold
+
             yield "event: retrieval\n"
-            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False, scores=scores)}, ensure_ascii=False)}\n\n"
 
             yield "event: token\n"
             yield f"data: {json.dumps({'text': answer}, ensure_ascii=False)}\n\n"
 
             yield "event: done\n"
-            yield f"data: {json.dumps({'answer': answer, 'citations': services._format_documents(docs, include_text=payload.return_context), 'latency_ms': None}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'answer': answer, 'refused': refused, 'refusal_score': top_score if refused else None, 'citations': services._format_documents(docs, include_text=payload.return_context, scores=scores), 'latency_ms': None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield "event: error\n"
             yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
@@ -170,8 +174,8 @@ async def retrieve_benchmark(request: Request):
     query = body.get("query", "")
     k = body.get("k", 10)
     mode = body.get("retrieval_mode") or default_retrieval_mode
-    docs = services._retrieve_raw(query=query, retrieval_mode=mode, k=k, rerank=True)
-    result = services._format_documents(docs, include_text=True)
+    docs, scores = services._retrieve_raw(query=query, retrieval_mode=mode, k=k, rerank=True)
+    result = services._format_documents(docs, include_text=True, scores=scores)
     # 将 chunk_id 移入 metadata，供 benchmark 提取
     for doc in result:
         if "metadata" not in doc:
