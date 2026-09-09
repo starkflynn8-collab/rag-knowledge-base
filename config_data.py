@@ -3,7 +3,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+CLOUDFLARE_ACCOUNT_ID = os.getenv("CLOUDFLARE_ACCOUNT_ID")
+CLOUDFLARE_API_TOKEN = os.getenv("CLOUDFLARE_API_TOKEN")
 
 md5_path = "./md5.text"
 
@@ -29,8 +30,11 @@ embedding_model_name = "bge-m3"
 ollama_base_url = "http://localhost:11434"
 embedding_batch_size = 4
 
-chat_model_name = "qwen3-max"
-rerank_model_name = "qwen3-rerank"
+chat_model_name = "@cf/meta/llama-3.2-3b-instruct"
+rerank_model_name = "@cf/baai/bge-reranker-base"
+
+cloudflare_chat_base_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/v1"
+cloudflare_rerank_base_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run"
 
 # 一个会话的唯一标识
 session_config = {

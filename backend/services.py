@@ -151,14 +151,14 @@ class AppServices:
                 "available": embedding_available,
             },
             "llm": {
-                "provider": "dashscope",
+                "provider": "cloudflare",
                 "model": config.chat_model_name,
-                "available": bool(config.DASHSCOPE_API_KEY),
+                "available": bool(config.CLOUDFLARE_API_TOKEN),
             },
             "rerank": {
-                "provider": "dashscope",
+                "provider": "cloudflare",
                 "model": config.rerank_model_name,
-                "available": bool(config.DASHSCOPE_API_KEY),
+                "available": bool(config.CLOUDFLARE_API_TOKEN),
             },
             "retrieval": {
                 "default_mode": config.default_retrieval_mode,
@@ -338,11 +338,11 @@ class AppServices:
     ):
         docs = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
         context = self.build_context(docs) if return_context else self.build_context(docs)
-        stream = self.answer_chain.stream(
+        answer = self.answer_chain.invoke(
             {"input": question, "context": context},
             {"configurable": {"session_id": session_id}},
         )
-        return docs, stream
+        return docs, answer
 
     def upload_file(self, file_path: Path, original_name: str, operator: str = "小虎") -> dict[str, Any]:
         documents = self.loader.load(str(file_path))

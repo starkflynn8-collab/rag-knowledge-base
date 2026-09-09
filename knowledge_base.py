@@ -112,9 +112,13 @@ class KnowledgeBaseService(object):
             documents
         )
 
+        # 获取当前全局chunk数量，用于全局编号
+        existing_count = len(self.chroma.get().get("ids", []))
+
         for chunk_index, chunk in enumerate(chunks):
-            chunk.metadata["chunk_id"] = chunk_index
-            chunk.metadata["source_chunk_id"] = f"{filename}#{chunk_index}"
+            global_id = existing_count + chunk_index
+            chunk.metadata["chunk_id"] = global_id
+            chunk.metadata["source_chunk_id"] = f"{filename}#{global_id}"
             if chunk.metadata.get("page") is None:
                 chunk.metadata["page"] = "unknown"
 

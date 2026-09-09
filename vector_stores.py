@@ -4,13 +4,13 @@
 1. Chroma 向量检索
 2. BM25 关键词检索
 3. RRF 混合检索
-4. DashScope Reranker 重排序
+4. Cloudflare Reranker 重排序
 """
 
 import hashlib
 import re
-
-import dashscope
+import json
+import urllib.request
 
 from langchain_chroma import Chroma
 from langchain_ollama import OllamaEmbeddings
@@ -221,26 +221,27 @@ class VectorStoreService(object):
         )
 
         # -------------------------
-        # 调用 DashScope Rerank
+        # 调用 Cloudflare Rerank
         # -------------------------
 
-        response = dashscope.TextReRank.call(
-            model=config.rerank_model_name,
-            query=query,
-            documents=document_texts,
-            top_n=config.rerank_top_k,
-            instruct=(
-                "Given a user query, "
-                "retrieve relevant passages "
-                "that answer the query."
-            )
-        )
+        url = f"{config.cloudflare_rerank_base_url}/{config.rerank_model_name}"
+        payload = json.dumps({
+            "query": query,
+            "contexts": [{"text": t} for t in document_texts],
+        }).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {config.CLOUDFLARE_API_TOKEN}",
+        }
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            response = json.loads(resp.read().decode())
 
         # -------------------------
         # 判断请求是否成功
         # -------------------------
 
-        if response.status_code != 200:
+        if not response.get("success", False):
             raise RuntimeError(
                 f"Reranker 调用失败: "
                 f"{response}"
@@ -250,15 +251,15 @@ class VectorStoreService(object):
         # 获取排序结果
         # -------------------------
 
-        results = response.output.results
+        results = response["result"]["response"]
 
         reranked_documents = []
 
         for result in results:
-            index = result["index"]
+            index = result["id"]
 
             score = result[
-                "relevance_score"
+                "score"
             ]
 
             doc = documents[index]

@@ -15,6 +15,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from langchain_core.documents import Document as LCDocument
 from backend.schemas import BatchIngestRequest, ChatRequest, RetrieveRequest
 from backend.services import AppServices
 from config_data import default_retrieval_mode
@@ -124,7 +125,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
 
     def generate():
         try:
-            docs, stream = services.stream_answer(
+            docs, answer = services.stream_answer(
                 question=payload.question,
                 session_id=payload.session_id,
                 retrieval_mode=payload.retrieval_mode or default_retrieval_mode,
@@ -135,23 +136,14 @@ async def chat_stream(payload: ChatRequest, request: Request):
             yield "event: retrieval\n"
             yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False)}, ensure_ascii=False)}\n\n"
 
-            answer_parts = []
-            for chunk in stream:
-                text = getattr(chunk, "content", None)
-                if text is None:
-                    text = str(chunk)
-                if not text:
-                    continue
-                answer_parts.append(text)
-                yield "event: token\n"
-                yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
+            yield "event: token\n"
+            yield f"data: {json.dumps({'text': answer}, ensure_ascii=False)}\n\n"
 
-            answer = "".join(answer_parts)
             yield "event: done\n"
             yield f"data: {json.dumps({'answer': answer, 'citations': services._format_documents(docs, include_text=payload.return_context), 'latency_ms': None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield "event: error\n"
-            yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '百炼模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -166,6 +158,53 @@ async def retrieve(payload: RetrieveRequest, request: Request):
         rerank=payload.rerank,
     )
     return JSONResponse(content=success_payload(data, rid=rid))
+
+
+@app.post("/retrieve")
+async def retrieve_benchmark(request: Request):
+    """rag-benchmark http_json adapter 兼容接口：检索"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"code": "BAD_JSON", "message": "请求体不是有效 JSON"})
+    query = body.get("query", "")
+    k = body.get("k", 10)
+    mode = body.get("retrieval_mode") or default_retrieval_mode
+    docs = services._retrieve_raw(query=query, retrieval_mode=mode, k=k, rerank=True)
+    result = services._format_documents(docs, include_text=True)
+    # 将 chunk_id 移入 metadata，供 benchmark 提取
+    for doc in result:
+        if "metadata" not in doc:
+            doc["metadata"] = {}
+        doc["metadata"]["chunk_id"] = doc.pop("chunk_id", "unknown")
+        doc["metadata"]["source"] = doc.pop("source", "unknown")
+    return JSONResponse(content={"documents": result})
+
+
+@app.post("/generate")
+async def generate_benchmark(request: Request):
+    """rag-benchmark http_json adapter 兼容接口：生成"""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"code": "BAD_JSON", "message": "请求体不是有效 JSON"})
+    query = body.get("query", "")
+    context = body.get("context", [])
+    if isinstance(context, list):
+        context_str = services.build_context([
+            LCDocument(
+                page_content=item.get("text", "") if isinstance(item, dict) else str(item),
+                metadata=item.get("metadata", {}) if isinstance(item, dict) else {}
+            )
+            for item in context
+        ]) if context else "无相关资料"
+    else:
+        context_str = str(context)
+    answer_text = services.answer_chain.invoke(
+        {"input": query, "context": context_str},
+        {"configurable": {"session_id": f"benchmark_{request_id()}"}},
+    )
+    return JSONResponse(content={"answer": answer_text})
 
 
 @app.get("/api/documents")

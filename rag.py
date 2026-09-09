@@ -10,7 +10,7 @@ from vector_stores import VectorStoreService
 from langchain_ollama import OllamaEmbeddings
 import config_data as config
 from langchain_core.prompts import ChatPromptTemplate,MessagesPlaceholder
-from langchain_community.chat_models.tongyi import ChatTongyi
+from langchain_openai import ChatOpenAI
 from citation import format_document_block
 
 
@@ -40,7 +40,13 @@ class RagService(object):
             ]
         )
 
-        self.chat_model = ChatTongyi(model=config.chat_model_name)
+        self.chat_model = ChatOpenAI(
+            model=config.chat_model_name,
+            base_url=config.cloudflare_chat_base_url,
+            api_key=config.CLOUDFLARE_API_TOKEN,
+            streaming=False,
+            max_tokens=2048,
+        )
 
         self.chain = self._get_chain()
 
