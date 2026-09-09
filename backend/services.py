@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -8,12 +8,12 @@ import sys
 import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import httpx
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableWithMessageHistory
@@ -53,6 +53,21 @@ def parse_chunk_count(message: str) -> int | None:
     return None
 
 
+
+def display_source_name(source: Any) -> str:
+    name = PureWindowsPath(str(source or "未知来源").replace("/", "\\")).name
+    suffix = PureWindowsPath(name).suffix
+    if suffix:
+        return name[: -len(suffix)]
+    return name
+
+
+def display_doc_type(source: Any, metadata_type: Any = None) -> str:
+    suffix = PureWindowsPath(str(source or "").replace("/", "\\")).suffix.lower().lstrip(".")
+    if suffix:
+        return suffix
+    value = str(metadata_type or "unknown").strip().lower()
+    return value or "unknown"
 def normalize_page(value: Any) -> str:
     if value in (None, "", "unknown"):
         return "unknown"
@@ -119,8 +134,9 @@ class AppServices:
             page_count = len(set(page_values)) if page_values else None
             items.append(
                 {
-                    "source": source,
-                    "doc_type": first.get("doc_type", "unknown"),
+                    "source": display_source_name(source),
+                    "source_path": source,
+                    "doc_type": display_doc_type(source, first.get("doc_type", "unknown")),
                     "version": first.get("version", "unknown"),
                     "chunk_count": len(docs),
                     "page_count": page_count,
@@ -260,7 +276,7 @@ class AppServices:
         if retrieval_mode == "vector":
             docs = vector_service.vector_store.similarity_search(query, k=limit)
             if rerank:
-                docs = vector_service.rerank(query, docs)
+                docs = vector_service.rerank(query, docs, top_n=limit)
             return docs[:limit]
 
         vector_docs = vector_service.vector_store.similarity_search(query, k=max(limit, config.vector_top_k))
@@ -268,7 +284,7 @@ class AppServices:
         if bm25_retriever is None:
             docs = vector_docs
             if rerank:
-                docs = vector_service.rerank(query, docs)
+                docs = vector_service.rerank(query, docs, top_n=limit)
             return docs[:limit]
 
         old_k = bm25_retriever.k
@@ -278,17 +294,39 @@ class AppServices:
         finally:
             bm25_retriever.k = old_k
 
-        fused_docs = vector_service._rrf_fusion(vector_docs, bm25_docs, k=config.rrf_const)
+        fused_docs = vector_service._rrf_fusion(vector_docs, bm25_docs, k=config.rrf_const, top_k=limit)
         if rerank:
-            fused_docs = vector_service.rerank(query, fused_docs)
+            fused_docs = vector_service.rerank(query, fused_docs, top_n=limit)
         return fused_docs[:limit]
 
+    def document_preview(self, source_path: str, max_chunks: int = 80) -> dict[str, Any]:
+        source_key = str(source_path or "")
+        chunks = [doc for doc in self._all_documents() if str(doc.metadata.get("source", "")) == source_key]
+        chunks.sort(key=lambda doc: safe_int(doc.metadata.get("chunk_id"), 0))
+        limited = chunks[: max(1, max_chunks)]
+        return {
+            "source": display_source_name(source_key),
+            "source_path": source_key,
+            "doc_type": display_doc_type(source_key, chunks[0].metadata.get("doc_type") if chunks else None),
+            "chunk_count": len(chunks),
+            "preview_chunk_count": len(limited),
+            "truncated": len(limited) < len(chunks),
+            "chunks": [
+                {
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "page": normalize_page(doc.metadata.get("page")),
+                    "text": doc.page_content,
+                }
+                for doc in limited
+            ],
+        }
     def retrieve(self, query: str, retrieval_mode: str, k: int, rerank: bool = True) -> dict[str, Any]:
         documents = self._retrieve_raw(query=query, retrieval_mode=retrieval_mode, k=k, rerank=rerank)
         return {
             "query": query,
             "retrieval_mode": retrieval_mode,
             "documents": self._format_documents(documents, include_text=True),
+            "document_count": len(documents),
         }
 
     def build_context(self, documents: list[Document]) -> str:
@@ -320,6 +358,7 @@ class AppServices:
             "session_id": session_id,
             "retrieval_mode": retrieval_mode,
             "citations": self._format_documents(docs, include_text=return_context),
+            "citation_count": len(docs),
             "usage": {
                 "prompt_tokens": None,
                 "completion_tokens": None,
@@ -344,6 +383,46 @@ class AppServices:
         )
         return docs, stream
 
+    def list_sessions(self) -> dict[str, Any]:
+        history_dir = Path("./chat_history")
+        items: list[dict[str, Any]] = []
+        if not history_dir.exists():
+            return {"items": []}
+
+        for path in history_dir.iterdir():
+            if not path.is_file():
+                continue
+            session_id = path.name
+            history = get_history(session_id)
+            messages = history.messages
+            first_user = next((msg.content for msg in messages if isinstance(msg, HumanMessage)), "")
+            last_message = messages[-1].content if messages else ""
+            stat = path.stat()
+            items.append(
+                {
+                    "session_id": session_id,
+                    "title": str(first_user or session_id)[:40],
+                    "message_count": len(messages),
+                    "last_message": str(last_message)[:120],
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                }
+            )
+
+        items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+        return {"items": items}
+
+    def get_session_history(self, session_id: str) -> dict[str, Any]:
+        history = get_history(session_id)
+        messages = []
+        for msg in history.messages:
+            if isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            else:
+                role = getattr(msg, "type", "assistant")
+            messages.append({"role": role, "content": str(msg.content)})
+        return {"session_id": session_id, "messages": messages}
     def upload_file(self, file_path: Path, original_name: str, operator: str = "小虎") -> dict[str, Any]:
         documents = self.loader.load(str(file_path))
         result = self.kb.upload_documents(
@@ -454,4 +533,9 @@ class AppServices:
     def clear_history(self, session_id: str) -> None:
         history = get_history(session_id)
         history.clear()
+
+
+
+
+
 

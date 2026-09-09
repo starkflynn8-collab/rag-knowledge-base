@@ -145,7 +145,7 @@ class VectorStoreService(object):
 # =========================================================
 # 使用 RRF 对向量检索和 BM25 检索结果进行融合
 # =========================================================
-    def _rrf_fusion(self, vector_docs, bm25_docs, k=None):
+    def _rrf_fusion(self, vector_docs, bm25_docs, k=None, top_k=None):
 
         if k is None:
             k = config.rrf_const
@@ -189,7 +189,9 @@ class VectorStoreService(object):
         # -------------------------
         results = []
 
-        for doc_id in sorted_ids[ :config.rrf_top_k]:
+        limit = top_k or config.rrf_top_k
+
+        for doc_id in sorted_ids[:limit]:
             results.append(
                 documents[doc_id]
             )
@@ -199,7 +201,7 @@ class VectorStoreService(object):
 # =========================================================
 # Reranker 重排
 # =========================================================
-    def rerank(self, query, documents):
+    def rerank(self, query, documents, top_n=None):
 
         if not documents:
             return []
@@ -224,11 +226,13 @@ class VectorStoreService(object):
         # 调用 DashScope Rerank
         # -------------------------
 
+        limit = max(1, min(top_n or config.rerank_top_k, len(document_texts)))
+
         response = dashscope.TextReRank.call(
             model=config.rerank_model_name,
             query=query,
             documents=document_texts,
-            top_n=config.rerank_top_k,
+            top_n=limit,
             instruct=(
                 "Given a user query, "
                 "retrieve relevant passages "
@@ -253,6 +257,7 @@ class VectorStoreService(object):
         results = response.output.results
 
         reranked_documents = []
+        selected_indices = set()
 
         for result in results:
             index = result["index"]
@@ -262,6 +267,7 @@ class VectorStoreService(object):
             ]
 
             doc = documents[index]
+            selected_indices.add(index)
 
             print(
                 f"\nRerank Score: {score:.4f}"
@@ -286,8 +292,15 @@ class VectorStoreService(object):
                 doc
             )
 
-        return reranked_documents
+        if len(reranked_documents) < limit:
+            for index, doc in enumerate(documents):
+                if index in selected_indices:
+                    continue
+                reranked_documents.append(doc)
+                if len(reranked_documents) >= limit:
+                    break
 
+        return reranked_documents[:limit]
 # =========================================================
 # 向量检索实现
 # =========================================================

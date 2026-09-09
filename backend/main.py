@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -133,7 +133,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
             )
 
             yield "event: retrieval\n"
-            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False), 'citation_count': len(docs)}, ensure_ascii=False)}\n\n"
 
             answer_parts = []
             for chunk in stream:
@@ -148,7 +148,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
 
             answer = "".join(answer_parts)
             yield "event: done\n"
-            yield f"data: {json.dumps({'answer': answer, 'citations': services._format_documents(docs, include_text=payload.return_context), 'latency_ms': None}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'answer': answer, 'citations': services._format_documents(docs, include_text=payload.return_context), 'citation_count': len(docs), 'latency_ms': None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield "event: error\n"
             yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '百炼模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
@@ -181,11 +181,28 @@ async def documents(
     return JSONResponse(content=success_payload(data, rid=rid))
 
 
+
+@app.get("/api/documents/preview")
+async def document_preview(request: Request, source_path: str = Query(min_length=1)):
+    rid = getattr(request.state, "request_id", request_id())
+    data = services.document_preview(source_path=source_path)
+    return JSONResponse(content=success_payload(data, rid=rid))
 @app.get("/api/documents/stats")
 async def documents_stats(request: Request):
     rid = getattr(request.state, "request_id", request_id())
     return JSONResponse(content=success_payload(services.document_stats(), rid=rid))
 
+
+@app.get("/api/sessions")
+async def sessions(request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    return JSONResponse(content=success_payload(services.list_sessions(), rid=rid))
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def session_history(session_id: str, request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    return JSONResponse(content=success_payload(services.get_session_history(session_id), rid=rid))
 
 @app.delete("/api/sessions/{session_id}/history")
 async def clear_history(session_id: str, request: Request):
@@ -231,3 +248,5 @@ async def batch_ingest(payload: BatchIngestRequest, request: Request):
 @app.get("/")
 async def root():
     return {"message": "DDSRag v2 API is running"}
+
+
