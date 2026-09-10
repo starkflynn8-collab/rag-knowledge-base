@@ -9,14 +9,15 @@ from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from langchain_core.documents import Document as LCDocument
-from backend.schemas import BatchIngestRequest, ChatRequest, RetrieveRequest
+from backend.schemas import BatchIngestRequest, ChatRequest, ModelSwitchRequest, RetrieveRequest, SessionTitleUpdate
 from backend.services import AppServices
 from config_data import default_retrieval_mode
 import config_data as config
@@ -24,6 +25,13 @@ import config_data as config
 
 app = FastAPI(title="DDSRag v2 API", version="1.0")
 services = AppServices()
+
+# 只读提供原始 HTML 文档及其 CSS、图片、脚本等相对资源。
+app.mount(
+    "/api/html",
+    StaticFiles(directory=config.html_source_root, check_dir=False),
+    name="html-documents",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -104,6 +112,18 @@ async def config_api(request: Request):
     return JSONResponse(content=success_payload(services.config_payload(), rid=rid))
 
 
+@app.post("/api/models/switch")
+async def switch_models(payload: ModelSwitchRequest, request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    try:
+        data = services.switch_model_mode(payload.mode)
+        return JSONResponse(content=success_payload(data, message="模型模式已切换", rid=rid))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_MODEL_MODE", "message": str(exc)})
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail={"code": "MODEL_SWITCH_FAILED", "message": "模型模式切换失败", "detail": str(exc)})
+
+
 @app.post("/api/chat")
 async def chat(payload: ChatRequest, request: Request):
     rid = getattr(request.state, "request_id", request_id())
@@ -117,7 +137,7 @@ async def chat(payload: ChatRequest, request: Request):
         )
         return JSONResponse(content=success_payload(data, rid=rid))
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": "LLM_FAILED", "message": "百炼模型调用失败", "detail": str(e)})
+        raise HTTPException(status_code=502, detail={"code": "LLM_FAILED", "message": "生成模型调用失败", "detail": str(e)})
 
 
 @app.post("/api/chat/stream")
@@ -135,7 +155,10 @@ async def chat_stream(payload: ChatRequest, request: Request):
             )
 
             top_score = scores[0] if scores else 0.0
-            refused = top_score < config.refusal_score_threshold
+            refused = (
+                not services.is_small_talk(payload.question)
+                and top_score < config.refusal_score_threshold
+            )
 
             yield "event: retrieval\n"
             yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False, scores=scores)}, ensure_ascii=False)}\n\n"
@@ -147,7 +170,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
             yield f"data: {json.dumps({'answer': answer, 'refused': refused, 'refusal_score': top_score if refused else None, 'citations': services._format_documents(docs, include_text=payload.return_context, scores=scores), 'latency_ms': None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield "event: error\n"
-            yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '生成模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
@@ -230,11 +253,82 @@ async def documents_stats(request: Request):
     return JSONResponse(content=success_payload(services.document_stats(), rid=rid))
 
 
+@app.get("/api/documents/preview")
+async def document_preview(
+    request: Request,
+    source_path: str = Query(..., min_length=1),
+    limit: int = Query(default=80, ge=1, le=200),
+):
+    rid = getattr(request.state, "request_id", request_id())
+    try:
+        data = services.document_preview(source_path, limit=limit)
+        return JSONResponse(content=success_payload(data, rid=rid))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DOCUMENT_NOT_FOUND", "message": "知识库中没有找到该文档", "detail": str(exc)},
+        )
+
+
+@app.get("/api/documents/html")
+async def html_document(
+    source_path: str = Query(..., min_length=1),
+):
+    try:
+        html_path = services.html_source_file(source_path)
+        return FileResponse(
+            path=html_path,
+            media_type="text/html",
+            headers={"Content-Disposition": "inline"},
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "HTML_NOT_FOUND", "message": "原始 HTML 页面不存在", "detail": str(exc)},
+        )
+
+
+@app.get("/api/sessions")
+async def sessions(request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    return JSONResponse(content=success_payload(services.list_sessions(), rid=rid))
+
+
+@app.get("/api/sessions/{session_id}/history")
+async def session_history(session_id: str, request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    return JSONResponse(content=success_payload(services.get_session_history(session_id), rid=rid))
+
+
+@app.patch("/api/sessions/{session_id}/title")
+async def update_session_title(session_id: str, payload: SessionTitleUpdate, request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    try:
+        data = services.update_session_title(session_id, payload.title)
+        return JSONResponse(content=success_payload(data, message="会话标题已更新", rid=rid))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_SESSION_TITLE", "message": str(exc)})
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": str(exc)})
+
+
 @app.delete("/api/sessions/{session_id}/history")
 async def clear_history(session_id: str, request: Request):
     rid = getattr(request.state, "request_id", request_id())
     services.clear_history(session_id)
     return JSONResponse(content=success_payload({"session_id": session_id}, message="历史已清空", rid=rid))
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str, request: Request):
+    rid = getattr(request.state, "request_id", request_id())
+    try:
+        services.delete_session(session_id)
+        return JSONResponse(content=success_payload({"session_id": session_id}, message="会话已删除", rid=rid))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"code": "INVALID_SESSION_ID", "message": str(exc)})
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": str(exc)})
 
 
 @app.post("/api/upload")

@@ -23,6 +23,14 @@ export function getConfig() {
   return request('/api/config')
 }
 
+export function switchModelMode(mode) {
+  return request('/api/models/switch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mode })
+  })
+}
+
 export function chat(payload) {
   return request('/api/chat', {
     method: 'POST',
@@ -103,6 +111,16 @@ export function getDocumentPreview(sourcePath) {
   const search = new URLSearchParams({ source_path: sourcePath })
   return request(`/api/documents/preview?${search.toString()}`)
 }
+
+export function getHtmlDocumentUrl(sourcePath) {
+  const path = String(sourcePath || '')
+    .replace(/^html[\\/]+/i, '')
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/')
+  return `${BASE_URL}/api/html/${path}`
+}
 export function getDocumentStats() {
   return request('/api/documents/stats')
 }
@@ -134,6 +152,20 @@ export function getSessionHistory(sessionId) {
 }
 export function clearHistory(sessionId) {
   return request(`/api/sessions/${encodeURIComponent(sessionId)}/history`, {
+    method: 'DELETE'
+  })
+}
+
+export function updateSessionTitle(sessionId, title) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}/title`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title })
+  })
+}
+
+export function deleteSession(sessionId) {
+  return request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE'
   })
 }

@@ -1,12 +1,14 @@
 import json
 import os
+from pathlib import Path
 from typing import Sequence
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.messages import BaseMessage, message_to_dict, messages_from_dict
 
 
 def get_history(session_id):
-    return FileChatMessageHistory(session_id, "./chat_history")
+    project_root = Path(__file__).resolve().parent
+    return FileChatMessageHistory(session_id, str(project_root / "chat_history"))
 
 
 class FileChatMessageHistory(BaseChatMessageHistory):

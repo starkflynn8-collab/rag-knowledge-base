@@ -25,6 +25,14 @@ class BatchIngestRequest(BaseModel):
     operator: str = "小虎"
 
 
+class ModelSwitchRequest(BaseModel):
+    mode: Literal["cloudflare", "dashscope"]
+
+
+class SessionTitleUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+
+
 class DocumentQueryParams(BaseModel):
     doc_type: str | None = None
     keyword: str | None = None
@@ -37,4 +45,3 @@ class UploadResponse(BaseModel):
     status: str
     message: str
     chunk_count: int | None = None
-

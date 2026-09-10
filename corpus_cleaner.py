@@ -73,7 +73,7 @@ def infer_doc_type(filename: str) -> str:
     if suffix == ".txt":
         return "txt"
     if suffix in (".html", ".htm"):
-        return "manual"
+        return "html"
 
     return "unknown"
 

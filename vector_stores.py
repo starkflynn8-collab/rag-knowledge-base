@@ -4,7 +4,7 @@
 1. Chroma 向量检索
 2. BM25 关键词检索
 3. RRF 混合检索
-4. Cloudflare Reranker 重排序
+4. Cloudflare / DashScope Reranker 重排序
 """
 
 import hashlib
@@ -220,18 +220,25 @@ class VectorStoreService(object):
             f"候选文档数量: {len(document_texts)}"
         )
 
-        # -------------------------
-        # 调用 Cloudflare Rerank
-        # -------------------------
+        profile = config.model_profile()
+        if profile["mode"] == "dashscope":
+            url = str(profile["rerank_base_url"])
+            request_payload = {
+                "model": str(profile["rerank_model"]),
+                "query": query,
+                "documents": document_texts,
+            }
+        else:
+            url = f"{profile['rerank_base_url']}/{profile['rerank_model']}"
+            request_payload = {
+                "query": query,
+                "contexts": [{"text": t} for t in document_texts],
+            }
 
-        url = f"{config.cloudflare_rerank_base_url}/{config.rerank_model_name}"
-        payload = json.dumps({
-            "query": query,
-            "contexts": [{"text": t} for t in document_texts],
-        }).encode("utf-8")
+        payload = json.dumps(request_payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {config.CLOUDFLARE_API_TOKEN}",
+            "Authorization": f"Bearer {profile['rerank_api_key']}",
         }
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -241,27 +248,25 @@ class VectorStoreService(object):
         # 判断请求是否成功
         # -------------------------
 
-        if not response.get("success", False):
-            raise RuntimeError(
-                f"Reranker 调用失败: "
-                f"{response}"
-            )
-
-        # -------------------------
-        # 获取排序结果
-        # -------------------------
-
-        results = response["result"]["response"]
+        if profile["mode"] == "dashscope":
+            if response.get("code") or response.get("message") and not response.get("output"):
+                raise RuntimeError(f"DashScope Reranker 调用失败: {response}")
+            results = response.get("results", [])
+            if not results:
+                results = (response.get("output") or {}).get("results", [])
+        else:
+            if not response.get("success", False):
+                raise RuntimeError(f"Cloudflare Reranker 调用失败: {response}")
+            results = response["result"]["response"]
 
         reranked_documents = []
         scores = []
 
         for result in results:
-            index = result["id"]
-
-            score = result[
-                "score"
-            ]
+            index = result.get("index", result.get("id"))
+            score = result.get("relevance_score", result.get("score"))
+            if index is None or score is None:
+                continue
 
             doc = documents[index]
 

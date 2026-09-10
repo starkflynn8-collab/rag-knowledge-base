@@ -40,14 +40,24 @@ class RagService(object):
             ]
         )
 
-        self.chat_model = ChatOpenAI(
-            model=config.chat_model_name,
-            base_url=config.cloudflare_chat_base_url,
-            api_key=config.CLOUDFLARE_API_TOKEN,
+        self.chat_model = self._build_chat_model()
+
+        self.chain = self._get_chain()
+
+    @staticmethod
+    def _build_chat_model():
+        profile = config.model_profile()
+        return ChatOpenAI(
+            model=str(profile["chat_model"]),
+            base_url=str(profile["chat_base_url"]),
+            api_key=str(profile["chat_api_key"]),
             streaming=False,
             max_tokens=2048,
         )
 
+    def rebuild_chat_model(self):
+        """模型模式切换后重建模型对象和链，保留同一个向量检索服务。"""
+        self.chat_model = self._build_chat_model()
         self.chain = self._get_chain()
 
     def _get_chain(self):

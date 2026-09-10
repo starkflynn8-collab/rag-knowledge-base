@@ -23,7 +23,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import config_data as config
-from citation import format_citation, format_document_block
+from citation import format_citation, format_document_block, resolve_chunk_id
 from corpus_cleaner import infer_doc_type, iter_supported_files, load_html, normalize_source
 from document_loader import DocumentLoaderService
 from file_history_store import get_history
@@ -59,12 +59,88 @@ def normalize_page(value: Any) -> str:
     return str(value)
 
 
+def normalize_document_type(source: Any, current_type: Any = None) -> str:
+    """按文件后缀归一化类型，兼容历史 metadata 中的 unknown/manual。"""
+    source_text = str(source or "")
+    suffix = Path(source_text).suffix.lower()
+    if suffix == ".pdf":
+        return "pdf"
+    if suffix in {".html", ".htm"}:
+        return "html"
+    if current_type not in (None, "", "unknown", "manual"):
+        return str(current_type)
+    return str(current_type or "unknown")
+
+
+def normalize_html_source_path(source: Any) -> str:
+    normalized = normalize_source(str(source or ""))
+    if normalized.lower().startswith("html\\"):
+        return normalized[6:]
+    return normalized
+
+
 class AppServices:
     def __init__(self) -> None:
         self.loader = DocumentLoaderService()
         self.kb = KnowledgeBaseService()
         self.rag = RagService()
         self.answer_chain = self._build_answer_chain()
+
+    def switch_model_mode(self, mode: str) -> dict[str, Any]:
+        """切换当前进程的生成模型和 rerank 模型，不重建 embedding 或 Chroma。"""
+        requested = config.model_profile(mode)
+        if not requested["chat_api_key_configured"] or not requested["rerank_api_key_configured"]:
+            provider = "阿里百炼" if requested["mode"] == "dashscope" else "Cloudflare"
+            raise ValueError(f"{provider} API 凭据未配置，无法切换")
+
+        old_mode = config.model_mode
+        config.set_model_mode(mode)
+        try:
+            self.rag.rebuild_chat_model()
+            self.answer_chain = self._build_answer_chain()
+        except Exception:
+            config.set_model_mode(old_mode)
+            self.rag.rebuild_chat_model()
+            self.answer_chain = self._build_answer_chain()
+            raise
+        return self.model_status()
+
+    @staticmethod
+    def model_status() -> dict[str, Any]:
+        profile = config.model_profile()
+        return {
+            "mode": profile["mode"],
+            "llm": {
+                "provider": profile["chat_provider"],
+                "model": profile["chat_model"],
+                "available": profile["chat_api_key_configured"],
+            },
+            "rerank": {
+                "provider": profile["rerank_provider"],
+                "model": profile["rerank_model"],
+                "available": profile["rerank_api_key_configured"],
+            },
+        }
+
+    @staticmethod
+    def is_small_talk(question: str) -> bool:
+        """识别不需要知识库检索的简单问候，避免被拒答阈值误判。"""
+        normalized = re.sub(r"[\s，。！？、,.!?；;：:~～]+", "", question or "").lower()
+        return bool(
+            re.fullmatch(
+                r"(你好|您好|嗨|嗨嗨|哈喽|hello|hi|hey|早上好|上午好|中午好|下午好|晚上好|晚安|谢谢|多谢|再见|拜拜)(啊|呀|喽)?",
+                normalized,
+            )
+        )
+
+    @staticmethod
+    def small_talk_response(question: str) -> str:
+        normalized = re.sub(r"[\s，。！？、,.!?；;：:~～]+", "", question or "").lower()
+        if normalized in {"谢谢", "多谢"}:
+            return "不客气！如果有 ZRDDS 技术问题，随时可以继续问我。"
+        if normalized in {"再见", "拜拜"}:
+            return "再见！需要查询 ZRDDS 文档时随时回来。"
+        return "你好！我是 DDS 技术文档问答助手。你可以直接问我 ZRDDS 的安装、配置、使用或故障排查问题。"
 
     def _build_answer_chain(self):
         def normalize_prompt_input(value: dict[str, Any]) -> dict[str, Any]:
@@ -120,7 +196,9 @@ class AppServices:
             items.append(
                 {
                     "source": source,
-                    "doc_type": first.get("doc_type", "unknown"),
+                    "source_path": source,
+                    "html_path": normalize_html_source_path(source),
+                    "doc_type": normalize_document_type(source, first.get("doc_type")),
                     "version": first.get("version", "unknown"),
                     "chunk_count": len(docs),
                     "page_count": page_count,
@@ -128,7 +206,12 @@ class AppServices:
                     "operator": first.get("operator"),
                 }
             )
-        items.sort(key=lambda x: x["source"])
+        items.sort(
+            key=lambda x: (
+                0 if x["doc_type"] == "pdf" else 1,
+                str(x["source"]).lower(),
+            )
+        )
         return items
 
     def health(self) -> dict[str, Any]:
@@ -151,15 +234,16 @@ class AppServices:
                 "available": embedding_available,
             },
             "llm": {
-                "provider": "cloudflare",
-                "model": config.chat_model_name,
-                "available": bool(config.CLOUDFLARE_API_TOKEN),
+                "provider": config.model_profile()["chat_provider"],
+                "model": config.model_profile()["chat_model"],
+                "available": config.model_profile()["chat_api_key_configured"],
             },
             "rerank": {
-                "provider": "cloudflare",
-                "model": config.rerank_model_name,
-                "available": bool(config.CLOUDFLARE_API_TOKEN),
+                "provider": config.model_profile()["rerank_provider"],
+                "model": config.model_profile()["rerank_model"],
+                "available": config.model_profile()["rerank_api_key_configured"],
             },
+            "model_mode": config.model_mode,
             "retrieval": {
                 "default_mode": config.default_retrieval_mode,
                 "vector_top_k": config.vector_top_k,
@@ -182,6 +266,23 @@ class AppServices:
             "ollama_base_url": config.ollama_base_url,
             "chat_model_name": config.chat_model_name,
             "rerank_model_name": config.rerank_model_name,
+            "model_mode": config.model_mode,
+            "model_options": {
+                "cloudflare": {
+                    "llm_provider": "cloudflare",
+                    "llm_model": config.cloudflare_chat_model_name,
+                    "rerank_provider": "cloudflare",
+                    "rerank_model": config.cloudflare_rerank_model_name,
+                    "configured": bool(config.CLOUDFLARE_API_TOKEN),
+                },
+                "dashscope": {
+                    "llm_provider": "dashscope",
+                    "llm_model": config.dashscope_chat_model_name,
+                    "rerank_provider": "dashscope",
+                    "rerank_model": config.dashscope_rerank_model_name,
+                    "configured": bool(config.DASHSCOPE_API_KEY),
+                },
+            },
             "default_retrieval_mode": config.default_retrieval_mode,
             "vector_top_k": config.vector_top_k,
             "bm25_top_k": config.bm25_top_k,
@@ -225,6 +326,53 @@ class AppServices:
             "by_version": dict(sorted(by_version.items())),
         }
 
+    def document_preview(self, source_path: str, limit: int = 80) -> dict[str, Any]:
+        requested_source = normalize_source(Path(source_path).as_posix())
+        documents = [
+            doc
+            for doc in self._all_documents()
+            if normalize_source(str(doc.metadata.get("source", ""))) == requested_source
+        ]
+        if not documents:
+            raise FileNotFoundError(f"知识库中没有找到文档：{source_path}")
+
+        chunks = []
+        for doc in documents[:limit]:
+            metadata = doc.metadata or {}
+            chunks.append(
+                {
+                    "chunk_id": resolve_chunk_id(metadata, doc.page_content),
+                    "page": normalize_page(metadata.get("page")),
+                    "text": doc.page_content,
+                }
+            )
+
+        first_metadata = documents[0].metadata or {}
+        return {
+            "source": first_metadata.get("source", requested_source),
+            "source_path": requested_source,
+            "doc_type": normalize_document_type(
+                first_metadata.get("source", requested_source),
+                first_metadata.get("doc_type"),
+            ),
+            "version": first_metadata.get("version", "unknown"),
+            "chunk_count": len(documents),
+            "preview_chunk_count": len(chunks),
+            "truncated": len(documents) > limit,
+            "chunks": chunks,
+        }
+
+    def html_source_file(self, source_path: str) -> Path:
+        """解析 HTML 原始文件，并限制访问范围在配置的 HTML 根目录内。"""
+        root = Path(config.html_source_root).expanduser().resolve()
+        relative = Path(normalize_html_source_path(source_path).replace("\\", "/"))
+        candidate = (root / relative).resolve()
+        if root != candidate and root not in candidate.parents:
+            raise FileNotFoundError("HTML 路径不在允许的文档目录内")
+        if candidate.suffix.lower() not in {".html", ".htm"} or not candidate.is_file():
+            raise FileNotFoundError(f"原始 HTML 不存在：{source_path}")
+        return candidate
+
     #引用粒度分级方法
     def _citation_granularity(self, score: float) -> str:
         if score >= config.citation_granularity_thresholds["fine"]:
@@ -246,7 +394,8 @@ class AppServices:
             score = scores[index - 1] if scores and index - 1 < len(scores) else None
             granularity = self._citation_granularity(score) if score is not None else "coarse"
 
-            citation = format_citation(metadata)
+            chunk_id = resolve_chunk_id(metadata, doc.page_content)
+            citation = format_citation(metadata, doc.page_content)
             if granularity == "medium":
                 source = metadata.get("source", "未知来源")
                 page = normalize_page(metadata.get("page"))
@@ -255,10 +404,13 @@ class AppServices:
             item = {
                 "index": index,
                 "source": metadata.get("source", "未知来源"),
-                "doc_type": metadata.get("doc_type", "unknown"),
+                "doc_type": normalize_document_type(
+                    metadata.get("source"),
+                    metadata.get("doc_type"),
+                ),
                 "version": metadata.get("version", "unknown"),
                 "page": normalize_page(metadata.get("page")),
-                "chunk_id": metadata.get("chunk_id", "unknown"),
+                "chunk_id": chunk_id,
                 "source_chunk_id": metadata.get("source_chunk_id"),
                 "citation": citation,
                 "score": score,
@@ -346,6 +498,23 @@ class AppServices:
         return_context: bool = True,
     ) -> dict[str, Any]:
         start = datetime.now()
+
+        if self.is_small_talk(question):
+            return {
+                "answer": self.small_talk_response(question),
+                "refused": False,
+                "refusal_score": None,
+                "session_id": session_id,
+                "retrieval_mode": "none",
+                "citations": [],
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
+                "latency_ms": int((datetime.now() - start).total_seconds() * 1000),
+            }
+
         docs, scores = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
 
         #比较最高分与拒绝阈值，显式拒绝无法回答的问题
@@ -395,6 +564,9 @@ class AppServices:
         top_k: int,
         return_context: bool = True,
     ):
+        if self.is_small_talk(question):
+            return [], [], self.small_talk_response(question)
+
         docs, scores = self._retrieve_raw(question, retrieval_mode, top_k, rerank=True)
 
         top_score = scores[0] if scores else 0.0
@@ -519,4 +691,109 @@ class AppServices:
     def clear_history(self, session_id: str) -> None:
         history = get_history(session_id)
         history.clear()
+
+    @property
+    def session_titles_path(self) -> Path:
+        return ROOT_DIR / "chat_history" / ".session_titles.json"
+
+    @staticmethod
+    def _validate_session_id(session_id: str) -> str:
+        value = str(session_id or "").strip()
+        if not value or Path(value).name != value or value in {".", ".."}:
+            raise ValueError("无效的会话 ID")
+        return value
+
+    def _read_session_titles(self) -> dict[str, str]:
+        try:
+            with self.session_titles_path.open("r", encoding="utf-8") as file:
+                data = json.load(file)
+            return data if isinstance(data, dict) else {}
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            return {}
+
+    def _write_session_titles(self, titles: dict[str, str]) -> None:
+        self.session_titles_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.session_titles_path.open("w", encoding="utf-8") as file:
+            json.dump(titles, file, ensure_ascii=False, indent=2)
+
+    def update_session_title(self, session_id: str, title: str) -> dict[str, str]:
+        session_id = self._validate_session_id(session_id)
+        normalized_title = re.sub(r"\s+", " ", str(title or "")).strip()
+        if not normalized_title:
+            raise ValueError("会话标题不能为空")
+        history_path = ROOT_DIR / "chat_history" / session_id
+        if not history_path.is_file():
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            history_path.write_text("[]", encoding="utf-8")
+        titles = self._read_session_titles()
+        titles[session_id] = normalized_title
+        self._write_session_titles(titles)
+        return {"session_id": session_id, "title": normalized_title}
+
+    def delete_session(self, session_id: str) -> None:
+        session_id = self._validate_session_id(session_id)
+        history_path = ROOT_DIR / "chat_history" / session_id
+        if not history_path.is_file():
+            raise FileNotFoundError(f"会话不存在：{session_id}")
+        history_path.unlink()
+        titles = self._read_session_titles()
+        if session_id in titles:
+            del titles[session_id]
+            self._write_session_titles(titles)
+
+    def get_session_history(self, session_id: str) -> dict[str, Any]:
+        messages = []
+        for message in get_history(session_id).messages:
+            content = message.content
+            if isinstance(content, list):
+                content = "".join(
+                    item.get("text", "") if isinstance(item, dict) else str(item)
+                    for item in content
+                )
+            messages.append(
+                {
+                    "role": "user" if message.type == "human" else "assistant",
+                    "content": str(content),
+                }
+            )
+        return {
+            "session_id": session_id,
+            "messages": messages,
+        }
+
+    def list_sessions(self) -> dict[str, Any]:
+        history_dir = ROOT_DIR / "chat_history"
+        titles = self._read_session_titles()
+        items = []
+        if not history_dir.exists():
+            return {"total": 0, "items": []}
+
+        for path in history_dir.iterdir():
+            if not path.is_file() or path.name.startswith("."):
+                continue
+            try:
+                messages = get_history(path.name).messages
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                continue
+            first_user_message = next(
+                (message for message in messages if message.type == "human"),
+                None,
+            )
+            title = titles.get(path.name) or (str(first_user_message.content).strip() if first_user_message else "新对话")
+            title = re.sub(r"\s+", " ", title)
+            if len(title) > 40:
+                title = f"{title[:40]}..."
+
+            updated_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
+            items.append(
+                {
+                    "session_id": path.name,
+                    "title": title,
+                    "message_count": len(messages),
+                    "updated_at": updated_at,
+                }
+            )
+
+        items.sort(key=lambda item: item["updated_at"], reverse=True)
+        return {"total": len(items), "items": items}
 
