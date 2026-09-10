@@ -3,7 +3,7 @@
     <header class="topbar">
       <div>
         <div class="brand">ZRDDS 知识库</div>
-        <div class="subtitle">本地 Ollama 检索 · Cloudflare 生成与重排</div>
+        <div class="subtitle">Vue + FastAPI + 本地 Ollama + 百炼</div>
       </div>
       <div class="status-chip" :class="{ ok: healthOk, bad: healthOk === false }">
         {{ healthLabel }}
@@ -26,36 +26,18 @@
             <button v-if="!sessionsCollapsed" type="button" class="new-session" @click="handleNewSession" :disabled="busy">新对话</button>
           </div>
           <div v-if="!sessionsCollapsed" class="session-list">
-            <div
+            <button
               v-for="item in sessions"
               :key="item.session_id"
+              type="button"
               class="session-item"
               :class="{ active: item.session_id === chatForm.session_id }"
               @click="selectSession(item.session_id)"
-              role="button"
-              tabindex="0"
-              @keydown.enter.prevent="selectSession(item.session_id)"
+              :disabled="busy"
             >
-              <div v-if="editingSessionId === item.session_id" class="session-edit-row" @click.stop>
-                <input
-                  v-model="editingTitle"
-                  class="session-title-input"
-                  maxlength="80"
-                  @keydown.enter.prevent="saveSessionTitle(item)"
-                  @keydown.esc.prevent="cancelSessionTitle"
-                />
-                <button type="button" class="session-action save" title="保存标题" @click.stop="saveSessionTitle(item)">保存</button>
-                <button type="button" class="session-action" title="取消编辑" @click.stop="cancelSessionTitle">取消</button>
-              </div>
-              <div v-else class="session-title-row">
-                <span class="session-title">{{ item.title || item.session_id }}</span>
-                <span class="session-actions" @click.stop>
-                  <button type="button" class="session-action" title="编辑对话标签" @click.stop="startSessionTitleEdit(item)">编辑</button>
-                  <button type="button" class="session-action danger" title="删除此对话" @click.stop="handleDeleteSession(item)">删除</button>
-                </span>
-              </div>
+              <span class="session-title">{{ item.title || item.session_id }}</span>
               <span class="session-meta">{{ item.message_count }} 条 · {{ formatSessionTime(item.updated_at) }}</span>
-            </div>
+            </button>
             <div v-if="sessions.length === 0" class="empty session-empty">暂无历史对话</div>
           </div>
         </aside>
@@ -136,33 +118,14 @@
             </li>
           </ol>
         </aside>
-        <div
-          v-if="selectedCitation && !isHtmlCitation(selectedCitation)"
-          class="citation-modal-backdrop"
-          @click="selectedCitation = null"
-        >
-          <section class="citation-modal" role="dialog" aria-modal="true" aria-labelledby="citation-modal-title" @click.stop>
-            <div class="citation-detail-head">
-              <h4 id="citation-modal-title">PDF 引用内容</h4>
-              <button type="button" class="ghost sidebar-close" @click="selectedCitation = null">关闭</button>
-            </div>
-            <div class="citation-detail-meta">
-              {{ selectedCitation.source || '未知来源' }}
-              <span v-if="selectedCitation.page && selectedCitation.page !== 'unknown'"> · 第 {{ selectedCitation.page }} 页</span>
-              <span v-if="selectedCitation.chunk_id"> · {{ selectedCitation.chunk_id }}</span>
-            </div>
-            <pre class="citation-detail-text">{{ selectedCitation.text || selectedCitation.snippet || '暂无引用内容' }}</pre>
-          </section>
-        </div>
       </section>
 
       <section v-else-if="tab === 'docs'" class="panel docs-panel">
         <div class="panel-head">
           <h2>知识库</h2>
           <div class="inline-controls">
-            <input v-model="docsQuery.keyword" placeholder="搜索文档名称" @keydown.enter="loadDocuments" />
-            <button class="secondary-button" @click="loadDocuments">查询</button>
-            <button class="secondary-button" @click="refreshDocuments">刷新</button>
+            <input v-model="docsQuery.keyword" placeholder="按文件名搜索" />
+            <button @click="loadDocuments">搜索</button>
           </div>
         </div>
 
@@ -180,14 +143,14 @@
 
         <div class="split">
           <div class="docs-table-section">
-            <h3>已入库文档</h3>
+            <h3>入库文档</h3>
             <div class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th><button type="button" class="sort-button" @click="toggleDocumentSort('source')">文档名称 <span>{{ sortIndicator('source') }}</span></button></th>
-                    <th><div class="type-header"><button type="button" class="sort-button" @click="toggleDocumentSort('doc_type')">类型 <span>{{ sortIndicator('doc_type') }}</span></button><select v-model="selectedDocType" class="type-filter" @click.stop><option value="">全部类型</option><option v-for="type in documentTypes" :key="type" :value="type">{{ type }}</option></select></div></th>
-                    <th><button type="button" class="sort-button" @click="toggleDocumentSort('chunk_count')">Chunks <span>{{ sortIndicator('chunk_count') }}</span></button></th>
+                    <th><button type="button" class="sort-button" @click="toggleDocumentSort('source')">文件名 <span>{{ sortIndicator('source') }}</span></button></th>
+                    <th><div class="type-header"><button type="button" class="sort-button" @click="toggleDocumentSort('doc_type')">文件类型 <span>{{ sortIndicator('doc_type') }}</span></button><select v-model="selectedDocType" class="type-filter" @click.stop><option value="">全部类型</option><option v-for="type in documentTypes" :key="type" :value="type">{{ type }}</option></select></div></th>
+                    <th><button type="button" class="sort-button" @click="toggleDocumentSort('chunk_count')">文本块数 <span>{{ sortIndicator('chunk_count') }}</span></button></th>
                     <th><button type="button" class="sort-button" @click="toggleDocumentSort('page_count')">页数 <span>{{ sortIndicator('page_count') }}</span></button></th>
                     <th>操作</th>
                   </tr>
@@ -195,10 +158,10 @@
                 <tbody>
                   <tr v-for="item in sortedDocumentItems" :key="item.source_path || item.source">
                     <td>{{ item.source }}</td>
-                    <td><span class="type-pill" :class="`type-${item.doc_type}`">{{ item.doc_type }}</span></td>
+                    <td>{{ item.doc_type }}</td>
                     <td>{{ item.chunk_count }}</td>
                     <td>{{ item.page_count ?? '-' }}</td>
-                    <td><button type="button" class="preview-button" @click="openDocumentPreview(item)" :disabled="busy">{{ item.doc_type === 'html' ? '打开页面' : '预览' }}</button></td>
+                    <td><button type="button" class="preview-button" @click="openDocumentPreview(item)" :disabled="busy">预览</button></td>
                   </tr>
                 </tbody>
               </table>
@@ -206,17 +169,17 @@
           </div>
 
           <div class="stack">
-            <h3>添加单个文件</h3>
+            <h3>单文件上传</h3>
             <label class="file-drop">
               <input type="file" @change="onPickFile" />
-              <span>{{ pickedFile ? pickedFile.name : '选择文件或拖入此处' }}</span>
+              <span>{{ pickedFile ? pickedFile.name : '选择文件或拖动上传' }}</span>
             </label>
-            <button class="primary-button" @click="handleUpload" :disabled="!pickedFile || busy">上传并入库</button>
+            <button @click="handleUpload" :disabled="!pickedFile || busy">上传入库</button>
 
-            <h3>批量导入目录</h3>
+            <h3>批量导入</h3>
             <div class="path-picker">
-              <input v-model="batchForm.path" placeholder="选择本地目录" readonly />
-              <button class="secondary-button" type="button" @click="openBatchPathPicker" :disabled="busy">选择目录</button>
+              <input v-model="batchForm.path" placeholder="请选择导入目录" readonly />
+              <button type="button" @click="openBatchPathPicker" :disabled="busy">选择路径</button>
               <input
                 ref="batchPathInput"
                 class="hidden-picker"
@@ -235,7 +198,7 @@
               <input v-model="batchForm.dry_run" type="checkbox" />
               <span>Dry Run（仅预览扫描结果，不实际写入知识库）</span>
             </label>
-            <button class="primary-button" @click="handleBatchIngest" :disabled="busy">开始批量导入</button>
+            <button @click="handleBatchIngest" :disabled="busy">执行批量导入</button>
 
             <pre class="result">{{ uploadResult }}</pre>
           </div>
@@ -342,14 +305,10 @@ import {
   getConfig,
   getDocumentStats,
   getDocumentPreview,
-  getHtmlDocumentUrl,
   getHealth,
   getSessionHistory,
   listDocuments,
   listSessions,
-  updateSessionTitle,
-  deleteSession,
-  switchModelMode,
   uploadFile
 } from './api.js'
 
@@ -361,10 +320,6 @@ const questionInput = ref(null)
 const messagesPane = ref(null)
 const health = reactive({})
 const configData = reactive({})
-const modelMode = ref('dashscope')
-const modelSwitching = ref(false)
-const modelMessage = ref('')
-const modelMessageType = ref('success')
 const documents = reactive({ total: 0, page: 1, page_size: 200, items: [] })
 const documentPreview = reactive({ source: '', source_path: '', doc_type: '', chunk_count: 0, preview_chunk_count: 0, truncated: false, chunks: [] })
 const previewOpen = ref(false)
@@ -372,18 +327,14 @@ const previewLoading = ref(false)
 const previewError = ref('')
 const previewWidth = ref(720)
 const previewResizeState = { active: false, startX: 0, startWidth: 0 }
-const documentSort = reactive({ key: 'doc_type', direction: 'asc' })
+const documentSort = reactive({ key: 'source', direction: 'asc' })
 const selectedDocType = ref('')
 const docStats = reactive({})
 const citations = ref([])
 const citationCount = ref(0)
 const citationsOpen = ref(false)
-const selectedCitation = ref(null)
 const sessions = ref([])
 const sessionsCollapsed = ref(false)
-const editingSessionId = ref('')
-const editingTitle = ref('')
-const sessionActionBusy = ref(false)
 const messages = ref(initialMessages())
 const uploadResult = ref('')
 const healthOk = ref(null)
@@ -433,12 +384,6 @@ const batchForm = reactive({
 })
 
 function compareDocumentValue(a, b, key) {
-  if (key === 'doc_type') {
-    const typeOrder = { pdf: 0, html: 1 }
-    const typeCompare = (typeOrder[a?.doc_type] ?? 2) - (typeOrder[b?.doc_type] ?? 2)
-    if (typeCompare !== 0) return typeCompare
-    return String(a?.source ?? '').localeCompare(String(b?.source ?? ''), 'zh-CN', { numeric: true, sensitivity: 'base' })
-  }
   const left = a?.[key]
   const right = b?.[key]
   if (key === 'chunk_count' || key === 'page_count') {
@@ -506,20 +451,10 @@ async function selectSession(sessionId) {
 
 function handleNewSession() {
   if (busy.value) return
-  const sessionId = createSessionId()
-  chatForm.session_id = sessionId
+  chatForm.session_id = createSessionId()
   chatForm.question = ''
   messages.value = initialMessages()
   setCitations([])
-  sessions.value = [
-    {
-      session_id: sessionId,
-      title: '新对话',
-      message_count: 0,
-      updated_at: new Date().toISOString()
-    },
-    ...sessions.value
-  ]
   nextTick(() => {
     resizeQuestionInput()
     scrollMessagesToBottom()
@@ -682,10 +617,6 @@ function stopPreviewResize() {
 }
 async function openDocumentPreview(item) {
   if (!item?.source_path) return
-  if (item.doc_type === 'html') {
-    window.open(getHtmlDocumentUrl(item.html_path || item.source_path), '_blank', 'noopener,noreferrer')
-    return
-  }
   previewOpen.value = true
   previewLoading.value = true
   previewError.value = ''
@@ -766,27 +697,10 @@ function buildChatPayload(question) {
 function setCitations(items, count) {
   citations.value = Array.isArray(items) ? items : []
   citationCount.value = Number.isInteger(count) ? count : citations.value.length
-  if (selectedCitation.value && !citations.value.some((item) => item.index === selectedCitation.value.index)) {
-    selectedCitation.value = null
-  }
 }
 
 function toggleCitations() {
   citationsOpen.value = !citationsOpen.value
-}
-
-function isHtmlCitation(item) {
-  return item?.doc_type === 'html' || /\.html?$/i.test(String(item?.source_path || item?.source || ''))
-}
-
-function handleCitationClick(item) {
-  if (!item) return
-  if (isHtmlCitation(item)) {
-    const source = item.source_path || item.source
-    window.open(getHtmlDocumentUrl(source), '_blank', 'noopener,noreferrer')
-    return
-  }
-  selectedCitation.value = item
 }
 
 function scrollMessagesToBottom() {
@@ -808,8 +722,6 @@ async function handleClearHistory() {
     await clearHistory(chatForm.session_id)
     messages.value = [{ role: 'assistant', content: '历史已清空' }]
     setCitations([])
-    thinking.value = false
-    await loadSessions()
   } finally {
     busy.value = false
   }
@@ -829,13 +741,9 @@ async function handleSend() {
 
   messages.value.push({ role: 'user', content: question })
   chatForm.question = ''
+  nextTick(resizeQuestionInput)
   busy.value = true
   setCitations([])
-  selectedCitation.value = null
-  thinking.value = true
-  await nextTick()
-  resizeQuestionInput()
-  scrollMessagesToBottom()
 
   try {
     if (streamMode.value) {
@@ -858,16 +766,8 @@ async function handleSend() {
             nextTick(scrollMessagesToBottom)
           },
           onDone(payload) {
-            thinking.value = false
             if (payload?.citations) setCitations(payload.citations, payload.citation_count)
-            if (payload?.answer) {
-              if (assistantIndex < 0) {
-                messages.value.push({ role: 'assistant', content: payload.answer })
-                assistantIndex = messages.value.length - 1
-              } else {
-                messages.value[assistantIndex].content = payload.answer
-              }
-            }
+            if (payload?.answer) messages.value[assistantIndex].content = payload.answer
             nextTick(scrollMessagesToBottom)
           },
           onError(payload) {
@@ -884,7 +784,6 @@ async function handleSend() {
       )
     } else {
       const res = await chat(buildChatPayload(question))
-      thinking.value = false
       messages.value.push({ role: 'assistant', content: res.answer })
       await nextTick()
       scrollMessagesToBottom()
@@ -909,9 +808,6 @@ onBeforeUnmount(() => {
 onMounted(async () => {
   await loadStatus()
   await loadSessions()
-  if (sessions.value.some((item) => item.session_id === chatForm.session_id)) {
-    await selectSession(chatForm.session_id)
-  }
   await loadDocuments()
   await nextTick()
   resizeQuestionInput()

@@ -145,7 +145,7 @@ class VectorStoreService(object):
 # =========================================================
 # 使用 RRF 对向量检索和 BM25 检索结果进行融合
 # =========================================================
-    def _rrf_fusion(self, vector_docs, bm25_docs, k=None):
+    def _rrf_fusion(self, vector_docs, bm25_docs, k=None, top_k=None):
 
         if k is None:
             k = config.rrf_const
@@ -189,7 +189,9 @@ class VectorStoreService(object):
         # -------------------------
         results = []
 
-        for doc_id in sorted_ids[ :config.rrf_top_k]:
+        limit = top_k or config.rrf_top_k
+
+        for doc_id in sorted_ids[:limit]:
             results.append(
                 documents[doc_id]
             )
@@ -199,8 +201,8 @@ class VectorStoreService(object):
 # =========================================================
 # Reranker 重排
 # =========================================================
-    def rerank(self, query, documents) -> tuple[list, list[float]]:
-        #重排方法签名修改，额外返回各chunk的重排得分，用于实现动态引用粒度以及与拒绝阈值比较
+    def rerank(self, query, documents, top_n=None):
+
         if not documents:
             return [], []
 
@@ -220,29 +222,23 @@ class VectorStoreService(object):
             f"候选文档数量: {len(document_texts)}"
         )
 
-        profile = config.model_profile()
-        if profile["mode"] == "dashscope":
-            url = str(profile["rerank_base_url"])
-            request_payload = {
-                "model": str(profile["rerank_model"]),
-                "query": query,
-                "documents": document_texts,
-            }
-        else:
-            url = f"{profile['rerank_base_url']}/{profile['rerank_model']}"
-            request_payload = {
-                "query": query,
-                "contexts": [{"text": t} for t in document_texts],
-            }
+        # -------------------------
+        # 调用 DashScope Rerank
+        # -------------------------
 
-        payload = json.dumps(request_payload).encode("utf-8")
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {profile['rerank_api_key']}",
-        }
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            response = json.loads(resp.read().decode())
+        limit = max(1, min(top_n or config.rerank_top_k, len(document_texts)))
+
+        response = dashscope.TextReRank.call(
+            model=config.rerank_model_name,
+            query=query,
+            documents=document_texts,
+            top_n=limit,
+            instruct=(
+                "Given a user query, "
+                "retrieve relevant passages "
+                "that answer the query."
+            )
+        )
 
         # -------------------------
         # 判断请求是否成功
@@ -260,7 +256,7 @@ class VectorStoreService(object):
             results = response["result"]["response"]
 
         reranked_documents = []
-        scores = []
+        selected_indices = set()
 
         for result in results:
             index = result.get("index", result.get("id"))
@@ -269,6 +265,7 @@ class VectorStoreService(object):
                 continue
 
             doc = documents[index]
+            selected_indices.add(index)
 
             print(
                 f"\nRerank Score: {score:.4f}"
@@ -294,8 +291,15 @@ class VectorStoreService(object):
             )
             scores.append(score)
 
-        return reranked_documents, scores
+        if len(reranked_documents) < limit:
+            for index, doc in enumerate(documents):
+                if index in selected_indices:
+                    continue
+                reranked_documents.append(doc)
+                if len(reranked_documents) >= limit:
+                    break
 
+        return reranked_documents[:limit]
 # =========================================================
 # 向量检索实现
 # =========================================================

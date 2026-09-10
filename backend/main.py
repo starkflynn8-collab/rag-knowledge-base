@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import sys
@@ -161,13 +161,22 @@ async def chat_stream(payload: ChatRequest, request: Request):
             )
 
             yield "event: retrieval\n"
-            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False, scores=scores)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'retrieval_mode': payload.retrieval_mode, 'documents': services._format_documents(docs, include_text=False), 'citation_count': len(docs)}, ensure_ascii=False)}\n\n"
 
-            yield "event: token\n"
-            yield f"data: {json.dumps({'text': answer}, ensure_ascii=False)}\n\n"
+            answer_parts = []
+            for chunk in stream:
+                text = getattr(chunk, "content", None)
+                if text is None:
+                    text = str(chunk)
+                if not text:
+                    continue
+                answer_parts.append(text)
+                yield "event: token\n"
+                yield f"data: {json.dumps({'text': text}, ensure_ascii=False)}\n\n"
 
+            answer = "".join(answer_parts)
             yield "event: done\n"
-            yield f"data: {json.dumps({'answer': answer, 'refused': refused, 'refusal_score': top_score if refused else None, 'citations': services._format_documents(docs, include_text=payload.return_context, scores=scores), 'latency_ms': None}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'answer': answer, 'citations': services._format_documents(docs, include_text=payload.return_context), 'citation_count': len(docs), 'latency_ms': None}, ensure_ascii=False)}\n\n"
         except Exception as e:
             yield "event: error\n"
             yield f"data: {json.dumps({'code': 'LLM_FAILED', 'message': '生成模型调用失败', 'detail': str(e)}, ensure_ascii=False)}\n\n"
@@ -247,45 +256,16 @@ async def documents(
     return JSONResponse(content=success_payload(data, rid=rid))
 
 
+
+@app.get("/api/documents/preview")
+async def document_preview(request: Request, source_path: str = Query(min_length=1)):
+    rid = getattr(request.state, "request_id", request_id())
+    data = services.document_preview(source_path=source_path)
+    return JSONResponse(content=success_payload(data, rid=rid))
 @app.get("/api/documents/stats")
 async def documents_stats(request: Request):
     rid = getattr(request.state, "request_id", request_id())
     return JSONResponse(content=success_payload(services.document_stats(), rid=rid))
-
-
-@app.get("/api/documents/preview")
-async def document_preview(
-    request: Request,
-    source_path: str = Query(..., min_length=1),
-    limit: int = Query(default=80, ge=1, le=200),
-):
-    rid = getattr(request.state, "request_id", request_id())
-    try:
-        data = services.document_preview(source_path, limit=limit)
-        return JSONResponse(content=success_payload(data, rid=rid))
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "DOCUMENT_NOT_FOUND", "message": "知识库中没有找到该文档", "detail": str(exc)},
-        )
-
-
-@app.get("/api/documents/html")
-async def html_document(
-    source_path: str = Query(..., min_length=1),
-):
-    try:
-        html_path = services.html_source_file(source_path)
-        return FileResponse(
-            path=html_path,
-            media_type="text/html",
-            headers={"Content-Disposition": "inline"},
-        )
-    except FileNotFoundError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail={"code": "HTML_NOT_FOUND", "message": "原始 HTML 页面不存在", "detail": str(exc)},
-        )
 
 
 @app.get("/api/sessions")
@@ -298,19 +278,6 @@ async def sessions(request: Request):
 async def session_history(session_id: str, request: Request):
     rid = getattr(request.state, "request_id", request_id())
     return JSONResponse(content=success_payload(services.get_session_history(session_id), rid=rid))
-
-
-@app.patch("/api/sessions/{session_id}/title")
-async def update_session_title(session_id: str, payload: SessionTitleUpdate, request: Request):
-    rid = getattr(request.state, "request_id", request_id())
-    try:
-        data = services.update_session_title(session_id, payload.title)
-        return JSONResponse(content=success_payload(data, message="会话标题已更新", rid=rid))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail={"code": "INVALID_SESSION_TITLE", "message": str(exc)})
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": str(exc)})
-
 
 @app.delete("/api/sessions/{session_id}/history")
 async def clear_history(session_id: str, request: Request):
@@ -368,3 +335,5 @@ async def batch_ingest(payload: BatchIngestRequest, request: Request):
 @app.get("/")
 async def root():
     return {"message": "DDSRag v2 API is running"}
+
+

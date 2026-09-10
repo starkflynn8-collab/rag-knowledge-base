@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -8,12 +8,12 @@ import sys
 import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import httpx
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough, RunnableWithMessageHistory
@@ -53,6 +53,21 @@ def parse_chunk_count(message: str) -> int | None:
     return None
 
 
+
+def display_source_name(source: Any) -> str:
+    name = PureWindowsPath(str(source or "未知来源").replace("/", "\\")).name
+    suffix = PureWindowsPath(name).suffix
+    if suffix:
+        return name[: -len(suffix)]
+    return name
+
+
+def display_doc_type(source: Any, metadata_type: Any = None) -> str:
+    suffix = PureWindowsPath(str(source or "").replace("/", "\\")).suffix.lower().lstrip(".")
+    if suffix:
+        return suffix
+    value = str(metadata_type or "unknown").strip().lower()
+    return value or "unknown"
 def normalize_page(value: Any) -> str:
     if value in (None, "", "unknown"):
         return "unknown"
@@ -195,10 +210,9 @@ class AppServices:
             page_count = len(set(page_values)) if page_values else None
             items.append(
                 {
-                    "source": source,
+                    "source": display_source_name(source),
                     "source_path": source,
-                    "html_path": normalize_html_source_path(source),
-                    "doc_type": normalize_document_type(source, first.get("doc_type")),
+                    "doc_type": display_doc_type(source, first.get("doc_type", "unknown")),
                     "version": first.get("version", "unknown"),
                     "chunk_count": len(docs),
                     "page_count": page_count,
@@ -443,20 +457,16 @@ class AppServices:
         if retrieval_mode == "vector":
             docs = vector_service.vector_store.similarity_search(query, k=limit)
             if rerank:
-                docs, scores = vector_service.rerank(query, docs)
-            else:
-                scores = []
-            return docs[:limit], scores[:limit]
+                docs = vector_service.rerank(query, docs, top_n=limit)
+            return docs[:limit]
 
         vector_docs = vector_service.vector_store.similarity_search(query, k=max(limit, config.vector_top_k))
         bm25_retriever = vector_service.get_bm25_retriever()
         if bm25_retriever is None:
             docs = vector_docs
             if rerank:
-                docs, scores = vector_service.rerank(query, docs)
-            else:
-                scores = []
-            return docs[:limit], scores[:limit]
+                docs = vector_service.rerank(query, docs, top_n=limit)
+            return docs[:limit]
 
         old_k = bm25_retriever.k
         bm25_retriever.k = max(limit, config.bm25_top_k)
@@ -465,20 +475,39 @@ class AppServices:
         finally:
             bm25_retriever.k = old_k
 
-        fused_docs = vector_service._rrf_fusion(vector_docs, bm25_docs, k=config.rrf_const)
+        fused_docs = vector_service._rrf_fusion(vector_docs, bm25_docs, k=config.rrf_const, top_k=limit)
         if rerank:
-            fused_docs, scores = vector_service.rerank(query, fused_docs)
-        else:
-            scores = []
-        return fused_docs[:limit], scores[:limit]
+            fused_docs = vector_service.rerank(query, fused_docs, top_n=limit)
+        return fused_docs[:limit]
 
+    def document_preview(self, source_path: str, max_chunks: int = 80) -> dict[str, Any]:
+        source_key = str(source_path or "")
+        chunks = [doc for doc in self._all_documents() if str(doc.metadata.get("source", "")) == source_key]
+        chunks.sort(key=lambda doc: safe_int(doc.metadata.get("chunk_id"), 0))
+        limited = chunks[: max(1, max_chunks)]
+        return {
+            "source": display_source_name(source_key),
+            "source_path": source_key,
+            "doc_type": display_doc_type(source_key, chunks[0].metadata.get("doc_type") if chunks else None),
+            "chunk_count": len(chunks),
+            "preview_chunk_count": len(limited),
+            "truncated": len(limited) < len(chunks),
+            "chunks": [
+                {
+                    "chunk_id": doc.metadata.get("chunk_id"),
+                    "page": normalize_page(doc.metadata.get("page")),
+                    "text": doc.page_content,
+                }
+                for doc in limited
+            ],
+        }
     def retrieve(self, query: str, retrieval_mode: str, k: int, rerank: bool = True) -> dict[str, Any]:
         documents, scores = self._retrieve_raw(query=query, retrieval_mode=retrieval_mode, k=k, rerank=rerank)
         return {
             "query": query,
             "retrieval_mode": retrieval_mode,
-            "top_rerank_score": scores[0] if scores else None,
-            "documents": self._format_documents(documents, include_text=True, scores=scores),
+            "documents": self._format_documents(documents, include_text=True),
+            "document_count": len(documents),
         }
 
     def build_context(self, documents: list[Document]) -> str:
@@ -547,7 +576,8 @@ class AppServices:
             "refused": False,
             "session_id": session_id,
             "retrieval_mode": retrieval_mode,
-            "citations": self._format_documents(docs, include_text=return_context, scores=scores),
+            "citations": self._format_documents(docs, include_text=return_context),
+            "citation_count": len(docs),
             "usage": {
                 "prompt_tokens": None,
                 "completion_tokens": None,
@@ -581,6 +611,46 @@ class AppServices:
         )
         return docs, scores, answer
 
+    def list_sessions(self) -> dict[str, Any]:
+        history_dir = Path("./chat_history")
+        items: list[dict[str, Any]] = []
+        if not history_dir.exists():
+            return {"items": []}
+
+        for path in history_dir.iterdir():
+            if not path.is_file():
+                continue
+            session_id = path.name
+            history = get_history(session_id)
+            messages = history.messages
+            first_user = next((msg.content for msg in messages if isinstance(msg, HumanMessage)), "")
+            last_message = messages[-1].content if messages else ""
+            stat = path.stat()
+            items.append(
+                {
+                    "session_id": session_id,
+                    "title": str(first_user or session_id)[:40],
+                    "message_count": len(messages),
+                    "last_message": str(last_message)[:120],
+                    "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                }
+            )
+
+        items.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
+        return {"items": items}
+
+    def get_session_history(self, session_id: str) -> dict[str, Any]:
+        history = get_history(session_id)
+        messages = []
+        for msg in history.messages:
+            if isinstance(msg, HumanMessage):
+                role = "user"
+            elif isinstance(msg, AIMessage):
+                role = "assistant"
+            else:
+                role = getattr(msg, "type", "assistant")
+            messages.append({"role": role, "content": str(msg.content)})
+        return {"session_id": session_id, "messages": messages}
     def upload_file(self, file_path: Path, original_name: str, operator: str = "小虎") -> dict[str, Any]:
         documents = self.loader.load(str(file_path))
         result = self.kb.upload_documents(
@@ -692,108 +762,8 @@ class AppServices:
         history = get_history(session_id)
         history.clear()
 
-    @property
-    def session_titles_path(self) -> Path:
-        return ROOT_DIR / "chat_history" / ".session_titles.json"
 
-    @staticmethod
-    def _validate_session_id(session_id: str) -> str:
-        value = str(session_id or "").strip()
-        if not value or Path(value).name != value or value in {".", ".."}:
-            raise ValueError("无效的会话 ID")
-        return value
 
-    def _read_session_titles(self) -> dict[str, str]:
-        try:
-            with self.session_titles_path.open("r", encoding="utf-8") as file:
-                data = json.load(file)
-            return data if isinstance(data, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
 
-    def _write_session_titles(self, titles: dict[str, str]) -> None:
-        self.session_titles_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.session_titles_path.open("w", encoding="utf-8") as file:
-            json.dump(titles, file, ensure_ascii=False, indent=2)
 
-    def update_session_title(self, session_id: str, title: str) -> dict[str, str]:
-        session_id = self._validate_session_id(session_id)
-        normalized_title = re.sub(r"\s+", " ", str(title or "")).strip()
-        if not normalized_title:
-            raise ValueError("会话标题不能为空")
-        history_path = ROOT_DIR / "chat_history" / session_id
-        if not history_path.is_file():
-            history_path.parent.mkdir(parents=True, exist_ok=True)
-            history_path.write_text("[]", encoding="utf-8")
-        titles = self._read_session_titles()
-        titles[session_id] = normalized_title
-        self._write_session_titles(titles)
-        return {"session_id": session_id, "title": normalized_title}
-
-    def delete_session(self, session_id: str) -> None:
-        session_id = self._validate_session_id(session_id)
-        history_path = ROOT_DIR / "chat_history" / session_id
-        if not history_path.is_file():
-            raise FileNotFoundError(f"会话不存在：{session_id}")
-        history_path.unlink()
-        titles = self._read_session_titles()
-        if session_id in titles:
-            del titles[session_id]
-            self._write_session_titles(titles)
-
-    def get_session_history(self, session_id: str) -> dict[str, Any]:
-        messages = []
-        for message in get_history(session_id).messages:
-            content = message.content
-            if isinstance(content, list):
-                content = "".join(
-                    item.get("text", "") if isinstance(item, dict) else str(item)
-                    for item in content
-                )
-            messages.append(
-                {
-                    "role": "user" if message.type == "human" else "assistant",
-                    "content": str(content),
-                }
-            )
-        return {
-            "session_id": session_id,
-            "messages": messages,
-        }
-
-    def list_sessions(self) -> dict[str, Any]:
-        history_dir = ROOT_DIR / "chat_history"
-        titles = self._read_session_titles()
-        items = []
-        if not history_dir.exists():
-            return {"total": 0, "items": []}
-
-        for path in history_dir.iterdir():
-            if not path.is_file() or path.name.startswith("."):
-                continue
-            try:
-                messages = get_history(path.name).messages
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                continue
-            first_user_message = next(
-                (message for message in messages if message.type == "human"),
-                None,
-            )
-            title = titles.get(path.name) or (str(first_user_message.content).strip() if first_user_message else "新对话")
-            title = re.sub(r"\s+", " ", title)
-            if len(title) > 40:
-                title = f"{title[:40]}..."
-
-            updated_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
-            items.append(
-                {
-                    "session_id": path.name,
-                    "title": title,
-                    "message_count": len(messages),
-                    "updated_at": updated_at,
-                }
-            )
-
-        items.sort(key=lambda item: item["updated_at"], reverse=True)
-        return {"total": len(items), "items": items}
 
