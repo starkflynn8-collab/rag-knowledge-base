@@ -1,12 +1,44 @@
 <template>
-  <div class="app-shell">
+  <section v-if="!authenticated" class="login-shell">
+    <div class="login-card">
+      <div class="brand">ZRDDS 知识库</div>
+      <div class="subtitle">南京臻融科技</div>
+      <div class="auth-tabs" aria-label="账户操作"><button type="button" :disabled="loginBusy" :class="{active: authMode === 'login'}" @click="switchAuthMode('login')">登录</button><button type="button" :disabled="loginBusy" :class="{active: authMode === 'register'}" @click="switchAuthMode('register')">注册</button></div>
+      <h1>{{ authMode === 'login' ? '欢迎登录' : '创建账号' }}</h1>
+      <form class="login-form" @submit.prevent="authMode === 'login' ? handleLogin() : handleRegister()">
+        <label>
+          <span>用户名</span>
+          <input v-model.trim="loginForm.username" required maxlength="80" autocapitalize="none" :spellcheck="false" autocomplete="username" :placeholder="authMode === 'register' ? '3–80 位字母、数字或 _ . -' : '请输入用户名'" />
+        </label>
+        <label v-if="authMode === 'register'"><span>显示名称 <small>（选填）</small></span><input v-model.trim="registerForm.displayName" maxlength="80" autocomplete="nickname" placeholder="例如：张先生" /></label>
+        <label>
+          <span>密码</span>
+          <span class="password-field"><input v-model="loginForm.password" required maxlength="200" :autocomplete="authMode === 'register' ? 'new-password' : 'current-password'" :type="passwordVisible ? 'text' : 'password'" :placeholder="authMode === 'register' ? '6–200 位密码' : '请输入密码'" /><button class="password-toggle" type="button" :aria-pressed="passwordVisible" @click="passwordVisible = !passwordVisible">{{ passwordVisible ? '隐藏' : '显示' }}</button></span>
+        </label>
+        <label v-if="authMode === 'register'"><span>确认密码</span><input v-model="registerForm.confirm" autocomplete="new-password" type="password" placeholder="请再次输入密码" /></label>
+        <div v-if="loginError" class="login-error" role="alert">{{ loginError }}</div>
+        <button class="primary-button login-button" type="submit" :disabled="loginBusy || !loginForm.username || !loginForm.password">
+          {{ loginBusy ? (authMode === 'login' ? '登录中...' : '注册中...') : (authMode === 'login' ? '登录' : '注册并登录') }}
+        </button>
+      </form>
+      <div class="login-hint">南京臻融科技 版权所有</div>
+    </div>
+  </section>
+  <div v-else class="app-shell">
     <header class="topbar">
       <div>
         <div class="brand">ZRDDS 知识库</div>
-        <div class="subtitle">本地 Ollama 检索 · Cloudflare 生成与重排</div>
+        <div class="subtitle">南京臻融科技</div>
       </div>
-      <div class="status-chip" :class="{ ok: healthOk, bad: healthOk === false }">
-        {{ healthLabel }}
+      <div class="topbar-actions">
+        <div class="user-chip">
+          {{ currentUser?.display_name || currentUser?.username }}
+          <span>{{ isAdmin ? '管理员' : '普通用户' }}</span>
+        </div>
+        <div class="status-chip" :class="{ ok: healthOk, bad: healthOk === false }">
+          {{ healthLabel }}
+        </div>
+        <button type="button" class="ghost logout-button" @click="handleLogout">退出登录</button>
       </div>
     </header>
 
@@ -14,6 +46,7 @@
       <button :class="{ active: tab === 'chat' }" @click="tab = 'chat'">问答助手</button>
       <button :class="{ active: tab === 'docs' }" @click="tab = 'docs'">知识库</button>
       <button :class="{ active: tab === 'status' }" @click="tab = 'status'">系统状态</button>
+      <button v-if="isAdmin" :class="{ active: tab === 'users' }" @click="tab = 'users'; loadUsers()">用户管理</button>
     </nav>
 
     <main class="layout">
@@ -205,7 +238,7 @@
             </div>
           </div>
 
-          <div class="stack">
+          <div v-if="canUpload" class="stack">
             <h3>添加单个文件</h3>
             <label class="file-drop">
               <input type="file" @change="onPickFile" />
@@ -239,6 +272,10 @@
 
             <pre class="result">{{ uploadResult }}</pre>
           </div>
+          <div v-else class="user-docs-note">
+            <strong>公共知识库</strong>
+            <span>当前账号可以查看文档和引用。上传、批量入库等维护操作由管理员负责。</span>
+          </div>
         </div>
 
         <aside v-if="previewOpen" class="preview-sidebar" :style="{ width: `${previewWidth}px` }">
@@ -262,10 +299,37 @@
         </aside>
       </section>
 
+      <section v-else-if="tab === 'users' && isAdmin" class="panel">
+        <div class="panel-head"><h2>用户管理</h2><button class="secondary-button" :disabled="usersLoading || savingUser !== null" @click="loadUsers">刷新</button></div>
+        <details class="create-user-section">
+          <summary>新增用户</summary>
+          <form class="create-user-form" @submit.prevent="handleCreateUser">
+            <label>账号<input v-model.trim="newUser.username" required minlength="3" maxlength="80" pattern="[A-Za-z0-9_.-]+" autocomplete="off" placeholder="3–80 位字母、数字或 _ . -" /></label>
+            <label>显示名称<input v-model.trim="newUser.display_name" maxlength="80" autocomplete="off" placeholder="选填" /></label>
+            <label>初始密码<input v-model="newUser.password" required minlength="6" maxlength="200" type="password" autocomplete="new-password" placeholder="至少 6 位" /></label>
+            <button type="submit" class="primary-button" :disabled="creatingUser">{{ creatingUser ? '创建中...' : '创建用户' }}</button>
+          </form>
+          <p v-if="createUserMessage" role="status">{{ createUserMessage }}</p>
+        </details>
+        <p v-if="usersMessage" role="status">{{ usersMessage }}</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>账号</th><th>显示名称</th><th>角色</th><th>状态</th><th>注册时间</th><th>最近登录</th><th>上传文档</th><th>模型切换</th><th>操作</th></tr></thead>
+            <tbody><tr v-for="account in userAccounts" :key="account.id">
+              <td>{{ account.username }}</td><td>{{ account.display_name }}</td><td>{{ account.is_admin ? '管理员' : '普通用户' }}</td><td><label class="account-status" :class="{ 'is-disabled': !account.enabled }"><input v-model="account.enabled" type="checkbox" role="switch" :aria-label="`${account.username} 账户启用状态`" :disabled="account.is_admin || savingUser !== null || usersLoading" /><span>{{ account.enabled ? '启用' : '禁用' }}</span></label></td>
+              <td>{{ formatSessionTime(account.created_at) }}</td><td>{{ formatSessionTime(account.last_login_at) || '尚未登录' }}</td>
+              <td><input v-model="account.can_upload" type="checkbox" :aria-label="`${account.username} 上传文档权限`" :disabled="account.is_admin || savingUser !== null" /></td>
+              <td><input v-model="account.can_switch_models" type="checkbox" :aria-label="`${account.username} 模型切换权限`" :disabled="account.is_admin || savingUser !== null" /></td>
+              <td><button v-if="!account.is_admin" class="secondary-button" :disabled="savingUser !== null || usersLoading" @click="saveAccount(account)">{{ savingUser === account.id ? '保存中...' : '保存' }}</button><span v-else>全部权限</span></td>
+            </tr></tbody>
+          </table>
+          <p v-if="usersLoading">加载中...</p>
+        </div>
+      </section>
       <section v-else class="panel">
         <div class="panel-head">
           <h2>系统状态</h2>
-          <div class="inline-controls">
+          <div v-if="canSwitchModels" class="inline-controls">
             <label class="control-field">
               <span>模型模式</span>
               <select v-model="modelMode" :disabled="modelSwitching || busy">
@@ -277,6 +341,7 @@
               {{ modelSwitching ? '切换中...' : '应用模型' }}
             </button>
           </div>
+          <div v-else class="model-access-notice" role="note"><strong>仅限查看 · 未开通模型切换权限</strong><span>如需更换模型，请联系管理员授权。</span></div>
         </div>
 
         <div v-if="modelMessage" class="model-message" :class="{ error: modelMessageType === 'error' }">
@@ -306,7 +371,7 @@
           </div>
         </div>
 
-        <div class="model-config-grid">
+        <div class="model-config-grid" :class="{ readonly: !canSwitchModels }">
           <div
             v-for="(option, mode) in (configData.model_options || {})"
             :key="mode"
@@ -315,9 +380,9 @@
             role="button"
             tabindex="0"
             :aria-pressed="mode === modelMode"
-            @click="selectModelMode(mode)"
-            @keydown.enter.prevent="selectModelMode(mode)"
-            @keydown.space.prevent="selectModelMode(mode)"
+            @click="canSwitchModels && selectModelMode(mode)"
+            @keydown.enter.prevent="canSwitchModels && selectModelMode(mode)"
+            @keydown.space.prevent="canSwitchModels && selectModelMode(mode)"
           >
             <div class="model-config-title">{{ mode === 'dashscope' ? '阿里百炼' : 'Cloudflare' }}</div>
             <div class="model-config-line">LLM：{{ option.llm_model }}</div>
@@ -345,6 +410,9 @@ import {
   getHtmlDocumentUrl,
   getHealth,
   getSessionHistory,
+  getCurrentUser,
+  login, register, listUsers, saveUserPermissions, createUser,
+  logout,
   listDocuments,
   listSessions,
   updateSessionTitle,
@@ -354,6 +422,21 @@ import {
 } from './api.js'
 
 const tab = ref('chat')
+const authenticated = ref(false)
+const currentUser = ref(null)
+const loginBusy = ref(false)
+const loginError = ref('')
+const loginForm = reactive({ username: '', password: '' })
+const registerForm = reactive({ displayName: '', confirm: '' })
+const authMode = ref('login')
+const passwordVisible = ref(false)
+function switchAuthMode(mode) {
+  authMode.value = mode
+  loginError.value = ''
+  loginForm.password = ''
+  registerForm.confirm = ''
+  passwordVisible.value = false
+}
 const busy = ref(false)
 const thinking = ref(false)
 const streamMode = ref(true)
@@ -395,10 +478,51 @@ const healthLabel = computed(() => {
 const prettyConfig = computed(() => JSON.stringify(configData, null, 2))
 const pickedFile = ref(null)
 const batchPathInput = ref(null)
+const isAdmin = computed(() => currentUser.value?.role === 'admin')
+const canUpload = computed(() => isAdmin.value || currentUser.value?.can_upload)
+const canSwitchModels = computed(() => isAdmin.value || currentUser.value?.can_switch_models)
+const userAccounts = ref([])
+const usersLoading = ref(false)
+const savingUser = ref(null)
+const usersMessage = ref('')
+const newUser = reactive({ username: '', display_name: '', password: '' })
+const creatingUser = ref(false)
+const createUserMessage = ref('')
+
+async function handleCreateUser() {
+  if (creatingUser.value) return
+  creatingUser.value = true
+  createUserMessage.value = ''
+  try {
+    await createUser({ ...newUser })
+    Object.assign(newUser, { username: '', display_name: '', password: '' })
+    createUserMessage.value = '用户创建成功，可在列表中设置权限。'
+    await loadUsers()
+  } catch (err) { createUserMessage.value = err.message }
+  finally { creatingUser.value = false }
+}
+
+async function loadUsers() {
+  usersLoading.value = true
+  usersMessage.value = ''
+  try { userAccounts.value = await listUsers() }
+  catch (err) { usersMessage.value = err.message }
+  finally { usersLoading.value = false }
+}
+
+async function saveAccount(account) {
+  savingUser.value = account.id
+  usersMessage.value = ''
+  try {
+    await saveUserPermissions(account.id, { can_upload: account.can_upload, can_switch_models: account.can_switch_models, enabled: account.enabled })
+    usersMessage.value = `${account.username} 的状态和权限已保存`
+  } catch (err) { usersMessage.value = err.message }
+  finally { savingUser.value = null }
+}
 
 const chatForm = reactive({
   question: '',
-  session_id: 'user_001',
+  session_id: '',
   retrieval_mode: 'hybrid',
   top_k: 5
 })
@@ -467,7 +591,85 @@ function initialMessages() {
 }
 
 function createSessionId() {
-  return `session_${Date.now()}`
+  if (globalThis.crypto?.randomUUID) return `session_${globalThis.crypto.randomUUID()}`
+  return `session_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+async function loadUserApp() {
+  await loadStatus()
+  await loadSessions()
+  if (!chatForm.session_id) {
+    chatForm.session_id = sessions.value[0]?.session_id || createSessionId()
+  }
+  if (sessions.value.some((item) => item.session_id === chatForm.session_id)) {
+    await selectSession(chatForm.session_id)
+  }
+  try {
+    await loadDocuments()
+  } catch (err) {
+    // Authentication remains valid when a reload briefly interrupts a data request.
+    console.error('加载知识库列表失败：', err)
+  }
+  await nextTick()
+  resizeQuestionInput()
+}
+
+async function handleLogin() {
+  if (loginBusy.value) return
+  loginBusy.value = true
+  loginError.value = ''
+  try {
+    currentUser.value = await login(loginForm.username, loginForm.password)
+    authenticated.value = true
+    loginForm.password = ''
+    try {
+      await loadUserApp()
+    } catch (err) {
+      console.error('登录后初始化页面失败：', err)
+    }
+  } catch (err) {
+    authenticated.value = false
+    currentUser.value = null
+    loginError.value = err.message || '登录失败'
+  } finally {
+    loginBusy.value = false
+  }
+}
+
+async function handleRegister() {
+  if (loginBusy.value) return
+  if (!/^[A-Za-z0-9_.-]{3,80}$/.test(loginForm.username)) { loginError.value = '用户名须为 3–80 位英文字母、数字、下划线、点或短横线'; return }
+  if (loginForm.password.length < 6 || loginForm.password.length > 200) { loginError.value = '密码长度须为 6–200 位'; return }
+  if (registerForm.displayName.length > 80) { loginError.value = '显示名称不能超过 80 位'; return }
+  if (registerForm.confirm !== loginForm.password) { loginError.value = '两次输入的密码不一致'; return }
+  loginBusy.value = true; loginError.value = ''
+  try {
+    currentUser.value = await register(loginForm.username, loginForm.password, registerForm.displayName)
+    authenticated.value = true; loginForm.password = ''; registerForm.confirm = ''
+    await loadUserApp()
+  } catch (err) { loginError.value = err.message || '注册失败' }
+  finally { loginBusy.value = false }
+}
+
+async function handleLogout() {
+  try {
+    await logout()
+  } finally {
+    Object.assign(loginForm, { username: '', password: '' })
+    Object.assign(registerForm, { displayName: '', confirm: '' })
+    Object.assign(newUser, { username: '', display_name: '', password: '' })
+    loginError.value = ''
+    passwordVisible.value = false
+    authMode.value = 'login'
+    userAccounts.value = []
+    createUserMessage.value = ''
+    authenticated.value = false
+    currentUser.value = null
+    sessions.value = []
+    messages.value = initialMessages()
+    chatForm.session_id = ''
+    tab.value = 'chat'
+  }
 }
 
 function formatSessionTime(value) {
@@ -722,7 +924,7 @@ async function handleUpload() {
   if (!pickedFile.value) return
   busy.value = true
   try {
-    const res = await uploadFile(pickedFile.value)
+    const res = await uploadFile(pickedFile.value, currentUser.value?.display_name || '')
     uploadResult.value = JSON.stringify(res, null, 2)
     await loadDocuments()
   } catch (err) {
@@ -907,14 +1109,18 @@ onBeforeUnmount(() => {
 })
 
 onMounted(async () => {
-  await loadStatus()
-  await loadSessions()
-  if (sessions.value.some((item) => item.session_id === chatForm.session_id)) {
-    await selectSession(chatForm.session_id)
+  try {
+    currentUser.value = await getCurrentUser()
+    authenticated.value = true
+  } catch {
+    authenticated.value = false
+    return
   }
-  await loadDocuments()
-  await nextTick()
-  resizeQuestionInput()
+  try {
+    await loadUserApp()
+  } catch (err) {
+    console.error('恢复登录状态后的页面初始化失败：', err)
+  }
 })
 </script>
 

@@ -1,7 +1,13 @@
-﻿const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
+import { apiErrorMessage } from './authErrors.js'
+
+const defaultApiHost =
+  typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'
+const BASE_URL =
+  import.meta.env.VITE_API_BASE_URL || `http://${defaultApiHost}:8000`
 
 async function request(path, options = {}) {
   const response = await fetch(`${BASE_URL}${path}`, {
+    credentials: 'include',
     headers: {
       ...(options.headers || {})
     },
@@ -9,10 +15,48 @@ async function request(path, options = {}) {
   })
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.success) {
-    const detail = data?.error?.detail || data?.message || response.statusText
+    const detail = apiErrorMessage(data, response.statusText)
     throw new Error(detail)
   }
   return data.data
+}
+
+export function login(username, password) {
+  return request('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password })
+  })
+}
+
+export function register(username, password, displayName) {
+  return request('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username, password, display_name: displayName }) })
+}
+
+export function logout() {
+  return request('/api/auth/logout', { method: 'POST' })
+}
+
+export function getCurrentUser() {
+  return request('/api/auth/me')
+}
+
+export function listUsers() {
+  return request('/api/admin/users')
+}
+
+export function createUser(payload) {
+  return request('/api/admin/users', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+}
+
+export function saveUserPermissions(id, permissions) {
+  return request(`/api/admin/users/${id}/permissions`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(permissions)
+  })
 }
 
 export function getHealth() {
@@ -42,6 +86,7 @@ export function chat(payload) {
 export async function chatStream(payload, handlers = {}) {
   const response = await fetch(`${BASE_URL}/api/chat/stream`, {
     method: 'POST',
+    credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   })

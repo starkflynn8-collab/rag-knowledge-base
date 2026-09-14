@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import sys
 import time
 import uuid
 import tempfile
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from langchain_core.documents import Document as LCDocument
-from backend.schemas import BatchIngestRequest, ChatRequest, ModelSwitchRequest, RetrieveRequest, SessionTitleUpdate
+from auth_store import authenticate, create_auth_session, register_user, revoke_auth_session, user_payload
+from backend.auth import get_current_user, require_admin, require_upload, require_model_switch
+from auth_store import list_users, set_user_permissions
+from backend.schemas import UserPermissionsUpdate
+from backend.schemas import BatchIngestRequest, ChatRequest, LoginRequest, ModelSwitchRequest, RegisterRequest, RetrieveRequest, SessionTitleUpdate
 from backend.services import AppServices
 from config_data import default_retrieval_mode
 import config_data as config
@@ -26,16 +30,9 @@ import config_data as config
 app = FastAPI(title="DDSRag v2 API", version="1.0")
 services = AppServices()
 
-# 只读提供原始 HTML 文档及其 CSS、图片、脚本等相对资源。
-app.mount(
-    "/api/html",
-    StaticFiles(directory=config.html_source_root, check_dir=False),
-    name="html-documents",
-)
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -106,14 +103,98 @@ async def health(request: Request):
     return JSONResponse(content=success_payload(services.health(), rid=rid))
 
 
+@app.post("/api/auth/login")
+async def login(payload: LoginRequest, response: Response, request: Request):
+    user = authenticate(payload.username, payload.password)
+    if user is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INVALID_CREDENTIALS", "message": "用户名或密码错误"},
+        )
+    token = create_auth_session(user.id)
+    result = JSONResponse(
+        content=success_payload(
+            user_payload(user),
+            message="登录成功",
+            rid=getattr(request.state, "request_id", request_id()),
+        )
+    )
+    result.set_cookie(
+        key=config.auth_cookie_name,
+        value=token,
+        max_age=config.auth_cookie_max_age,
+        httponly=True,
+        secure=config.auth_cookie_secure,
+        samesite="lax",
+        path="/",
+    )
+    return result
+
+@app.post("/api/auth/register")
+async def register(payload: RegisterRequest, request: Request):
+    try:
+        user = register_user(payload.username, payload.password, payload.display_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"code": "USERNAME_EXISTS", "message": str(exc)})
+    token = create_auth_session(user.id)
+    result = JSONResponse(content=success_payload(user_payload(user), message="注册成功"))
+    result.set_cookie(key=config.auth_cookie_name, value=token, max_age=config.auth_cookie_max_age, httponly=True, secure=config.auth_cookie_secure, samesite="lax", path="/")
+    return result
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request, response: Response):
+    revoke_auth_session(request.cookies.get(config.auth_cookie_name))
+    result = JSONResponse(
+        content=success_payload(
+            {},
+            message="已退出登录",
+            rid=getattr(request.state, "request_id", request_id()),
+        )
+    )
+    result.delete_cookie(config.auth_cookie_name, path="/")
+    return result
+
+
+@app.get("/api/auth/me")
+async def me(request: Request, user=Depends(get_current_user)):
+    rid = getattr(request.state, "request_id", request_id())
+    return JSONResponse(content=success_payload(user_payload(user), rid=rid))
+
+
 @app.get("/api/config")
-async def config_api(request: Request):
+async def config_api(request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
     return JSONResponse(content=success_payload(services.config_payload(), rid=rid))
 
 
+@app.get('/api/admin/users')
+def admin_users(user=Depends(require_admin)):
+    return success_payload(list_users())
+
+
+@app.post('/api/admin/users', status_code=201)
+def admin_create_user(payload: RegisterRequest, user=Depends(require_admin)):
+    try:
+        created = register_user(payload.username, payload.password, payload.display_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={'code': 'USERNAME_EXISTS', 'message': str(exc)})
+    return success_payload(user_payload(created), message='用户已创建')
+
+
+@app.patch('/api/admin/users/{user_id}/permissions')
+def update_user_permissions(user_id: int, payload: UserPermissionsUpdate, user=Depends(require_admin)):
+    try:
+        set_user_permissions(user_id, payload.can_upload, payload.can_switch_models, payload.enabled)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return success_payload({}, message='权限已保存')
+
+
 @app.post("/api/models/switch")
-async def switch_models(payload: ModelSwitchRequest, request: Request):
+async def switch_models(payload: ModelSwitchRequest, request: Request, user=Depends(require_model_switch)):
     rid = getattr(request.state, "request_id", request_id())
     try:
         data = services.switch_model_mode(payload.mode)
@@ -125,30 +206,42 @@ async def switch_models(payload: ModelSwitchRequest, request: Request):
 
 
 @app.post("/api/chat")
-async def chat(payload: ChatRequest, request: Request):
+async def chat(payload: ChatRequest, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
+    session_id = payload.session_id or f"session_{uuid.uuid4().hex}"
     try:
+        services.ensure_session(user, session_id)
         data = services.answer(
             question=payload.question,
-            session_id=payload.session_id,
+            session_id=session_id,
             retrieval_mode=payload.retrieval_mode or default_retrieval_mode,
             top_k=payload.top_k,
             return_context=payload.return_context,
         )
         return JSONResponse(content=success_payload(data, rid=rid))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "SESSION_FORBIDDEN", "message": str(exc)})
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": "LLM_FAILED", "message": "生成模型调用失败", "detail": str(e)})
 
 
 @app.post("/api/chat/stream")
-async def chat_stream(payload: ChatRequest, request: Request):
+async def chat_stream(payload: ChatRequest, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
+    session_id = payload.session_id or f"session_{uuid.uuid4().hex}"
+    try:
+        services.ensure_session(user, session_id)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "SESSION_FORBIDDEN", "message": str(exc)},
+        )
 
     def generate():
         try:
             docs, scores, answer = services.stream_answer(
                 question=payload.question,
-                session_id=payload.session_id,
+                session_id=session_id,
                 retrieval_mode=payload.retrieval_mode or default_retrieval_mode,
                 top_k=payload.top_k,
                 return_context=payload.return_context,
@@ -176,7 +269,7 @@ async def chat_stream(payload: ChatRequest, request: Request):
 
 
 @app.post("/api/retrieve")
-async def retrieve(payload: RetrieveRequest, request: Request):
+async def retrieve(payload: RetrieveRequest, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
     data = services.retrieve(
         query=payload.query,
@@ -188,7 +281,7 @@ async def retrieve(payload: RetrieveRequest, request: Request):
 
 
 @app.post("/retrieve")
-async def retrieve_benchmark(request: Request):
+async def retrieve_benchmark(request: Request, user=Depends(get_current_user)):
     """rag-benchmark http_json adapter 兼容接口：检索"""
     try:
         body = await request.json()
@@ -209,7 +302,7 @@ async def retrieve_benchmark(request: Request):
 
 
 @app.post("/generate")
-async def generate_benchmark(request: Request):
+async def generate_benchmark(request: Request, user=Depends(get_current_user)):
     """rag-benchmark http_json adapter 兼容接口：生成"""
     try:
         body = await request.json()
@@ -227,9 +320,11 @@ async def generate_benchmark(request: Request):
         ]) if context else "无相关资料"
     else:
         context_str = str(context)
+    benchmark_session_id = f"benchmark_{request_id()}"
+    services.ensure_session(user, benchmark_session_id)
     answer_text = services.answer_chain.invoke(
         {"input": query, "context": context_str},
-        {"configurable": {"session_id": f"benchmark_{request_id()}"}},
+        {"configurable": {"session_id": benchmark_session_id}},
     )
     return JSONResponse(content={"answer": answer_text})
 
@@ -237,6 +332,7 @@ async def generate_benchmark(request: Request):
 @app.get("/api/documents")
 async def documents(
     request: Request,
+    user=Depends(get_current_user),
     doc_type: str | None = Query(default=None),
     keyword: str | None = Query(default=None),
     page: int = Query(default=1, ge=1),
@@ -248,7 +344,7 @@ async def documents(
 
 
 @app.get("/api/documents/stats")
-async def documents_stats(request: Request):
+async def documents_stats(request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
     return JSONResponse(content=success_payload(services.document_stats(), rid=rid))
 
@@ -256,6 +352,7 @@ async def documents_stats(request: Request):
 @app.get("/api/documents/preview")
 async def document_preview(
     request: Request,
+    user=Depends(get_current_user),
     source_path: str = Query(..., min_length=1),
     limit: int = Query(default=80, ge=1, le=200),
 ):
@@ -272,6 +369,8 @@ async def document_preview(
 
 @app.get("/api/documents/html")
 async def html_document(
+    request: Request,
+    user=Depends(get_current_user),
     source_path: str = Query(..., min_length=1),
 ):
     try:
@@ -288,23 +387,44 @@ async def html_document(
         )
 
 
+@app.get("/api/html/{file_path:path}")
+async def html_file(file_path: str, user=Depends(get_current_user)):
+    try:
+        asset_path = services.html_source_asset(file_path)
+        media_type = mimetypes.guess_type(asset_path.name)[0] or "application/octet-stream"
+        return FileResponse(
+            path=asset_path,
+            media_type=media_type,
+            headers={"Content-Disposition": "inline"},
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "HTML_NOT_FOUND", "message": "原始 HTML 页面不存在", "detail": str(exc)},
+        )
+
+
 @app.get("/api/sessions")
-async def sessions(request: Request):
+async def sessions(request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
-    return JSONResponse(content=success_payload(services.list_sessions(), rid=rid))
+    return JSONResponse(content=success_payload(services.list_sessions(user), rid=rid))
 
 
 @app.get("/api/sessions/{session_id}/history")
-async def session_history(session_id: str, request: Request):
+async def session_history(session_id: str, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
-    return JSONResponse(content=success_payload(services.get_session_history(session_id), rid=rid))
+    try:
+        data = services.get_session_history(user, session_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": str(exc)})
+    return JSONResponse(content=success_payload(data, rid=rid))
 
 
 @app.patch("/api/sessions/{session_id}/title")
-async def update_session_title(session_id: str, payload: SessionTitleUpdate, request: Request):
+async def update_session_title(session_id: str, payload: SessionTitleUpdate, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
     try:
-        data = services.update_session_title(session_id, payload.title)
+        data = services.update_session_title(user, session_id, payload.title)
         return JSONResponse(content=success_payload(data, message="会话标题已更新", rid=rid))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"code": "INVALID_SESSION_TITLE", "message": str(exc)})
@@ -313,17 +433,20 @@ async def update_session_title(session_id: str, payload: SessionTitleUpdate, req
 
 
 @app.delete("/api/sessions/{session_id}/history")
-async def clear_history(session_id: str, request: Request):
+async def clear_history(session_id: str, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
-    services.clear_history(session_id)
-    return JSONResponse(content=success_payload({"session_id": session_id}, message="历史已清空", rid=rid))
+    try:
+        services.clear_history(user, session_id)
+        return JSONResponse(content=success_payload({"session_id": session_id}, message="历史已清空", rid=rid))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail={"code": "SESSION_NOT_FOUND", "message": str(exc)})
 
 
 @app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, request: Request):
+async def delete_session(session_id: str, request: Request, user=Depends(get_current_user)):
     rid = getattr(request.state, "request_id", request_id())
     try:
-        services.delete_session(session_id)
+        services.delete_session(user, session_id)
         return JSONResponse(content=success_payload({"session_id": session_id}, message="会话已删除", rid=rid))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"code": "INVALID_SESSION_ID", "message": str(exc)})
@@ -336,6 +459,7 @@ async def upload(
     request: Request,
     file: UploadFile = File(...),
     operator: str = Form(default="小虎"),
+    user=Depends(require_upload),
 ):
     rid = getattr(request.state, "request_id", request_id())
     suffix = Path(file.filename).suffix or ".bin"
@@ -344,7 +468,7 @@ async def upload(
         temp_path = Path(temp_file.name)
 
     try:
-        data = services.upload_file(temp_path, file.filename, operator=operator)
+        data = services.upload_file(temp_path, file.filename, operator=user.display_name)
         return JSONResponse(content=success_payload(data, rid=rid))
     except Exception as e:
         raise HTTPException(status_code=400, detail={"code": "FILE_PROCESS_FAILED", "message": "文件处理失败", "detail": str(e)})
@@ -354,13 +478,13 @@ async def upload(
 
 
 @app.post("/api/batch-ingest")
-async def batch_ingest(payload: BatchIngestRequest, request: Request):
+async def batch_ingest(payload: BatchIngestRequest, request: Request, user=Depends(require_upload)):
     rid = getattr(request.state, "request_id", request_id())
     data = services.batch_ingest(
         path=payload.path,
         include_noise_html=payload.include_noise_html,
         dry_run=payload.dry_run,
-        operator=payload.operator,
+        operator=user.display_name,
     )
     return JSONResponse(content=success_payload(data, message="批量导入完成", rid=rid))
 

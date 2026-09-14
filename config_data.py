@@ -1,4 +1,6 @@
+import hashlib
 import os
+import secrets
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -16,6 +18,26 @@ md5_path = str(PROJECT_ROOT / "md5.text")
 collection_name = "rag"
 persist_directory = str(PROJECT_ROOT / "chroma_db")
 
+# Authentication and application data
+auth_db_path = str(PROJECT_ROOT / "data" / "auth.sqlite3")
+auth_cookie_name = os.getenv("AUTH_COOKIE_NAME", "ddsrag_session")
+auth_cookie_max_age = int(os.getenv("AUTH_COOKIE_MAX_AGE", str(7 * 24 * 3600)))
+auth_cookie_secure = os.getenv("AUTH_COOKIE_SECURE", "false").strip().lower() == "true"
+auth_secret_path = PROJECT_ROOT / "data" / "auth_secret.key"
+
+
+def _load_auth_secret() -> str:
+    configured = os.getenv("AUTH_SECRET_KEY", "").strip()
+    if configured:
+        return configured
+
+    # Stable development fallback; production deployments must configure AUTH_SECRET_KEY.
+    return hashlib.sha256(
+        f"DDSRag-v2:{PROJECT_ROOT}".encode("utf-8")
+    ).hexdigest()
+
+
+auth_secret_key = _load_auth_secret()
 # HTML 原始文档目录：知识库中的 HTML source 是相对于该目录的路径
 html_source_root = os.getenv(
     "HTML_SOURCE_ROOT",

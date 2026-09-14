@@ -14,8 +14,27 @@
 - 批量入库脚本：支持目录递归导入。
 - HTML 清洗模块：过滤 Doxygen/Javadoc 噪声页，处理多编码 HTML。
 - 引用格式化：回答上下文带 `[n]` 编号和出处。
+- 登录与权限控制：使用 SQLite 保存用户、认证会话和按用户隔离的聊天记录。
+- Vue + FastAPI 入口：浏览器访问 Vue 页面，业务请求统一经过 FastAPI。
 
-## 2. 主要文件职责
+## 2. 登录与权限
+
+系统默认提供两个演示账号：
+
+```text
+管理员：admin / admin123
+普通用户：student / student123
+```
+
+普通用户可以问答、查看知识库和自己的历史对话；管理员额外可以上传文件、批量入库和切换模型模式。聊天会话和消息保存在：
+
+```text
+data/auth.sqlite3
+```
+
+数据库首次启动时自动创建，并将旧 `chat_history` 文件迁移到 `admin` 账号下。迁移不会删除原文件。部署或验收前应修改默认密码，并在 `.env` 中设置固定且足够长的 `AUTH_SECRET_KEY`。开发环境如果未配置该变量，程序会根据项目路径生成稳定的开发密钥，避免 `uvicorn --reload` 后已有登录 Cookie 失效；正式部署必须配置固定且随机的密钥。
+
+## 3. 主要文件职责
 
 | 文件 | 作用 |
 |---|---|
@@ -28,10 +47,12 @@
 | `rag.py` | 检索结果格式化、Prompt、百炼生成、会话历史 |
 | `corpus_cleaner.py` | HTML 清洗、噪声过滤、版本和文档类型识别 |
 | `citation.py` | 引用格式化 |
-| `file_history_store.py` | 本地 JSON 聊天历史 |
+| `auth_store.py` | SQLite 用户、认证会话和聊天历史 |
+| `backend/auth.py` | FastAPI 登录身份与管理员权限依赖 |
+| `file_history_store.py` | LangChain 聊天历史适配器，底层使用 SQLite |
 | `config_data.py` | 模型、向量库、检索参数配置 |
 
-## 3. 模型配置
+## 4. 模型配置
 
 当前模型配置在 `config_data.py`：
 
@@ -65,7 +86,7 @@ ollama pull bge-m3
 DASHSCOPE_API_KEY=你的百炼 API Key
 ```
 
-## 4. 本地数据位置
+## 5. 本地数据位置
 
 当前配置：
 
@@ -81,7 +102,7 @@ md5_path = "./md5.text"
 - `md5.text` 记录已导入文件的 MD5，用于避免重复导入。
 - 当前 v2 仍使用固定 collection 和固定 Chroma 目录。更换 embedding 模型时，应重建知识库，否则可能出现向量维度不匹配。
 
-## 5. 入库流程
+## 6. 入库流程
 
 ### 5.1 前端单文件上传
 
@@ -157,7 +178,7 @@ cd "D:\project\DDS\DDSRag - v2"
 
 一般不建议使用 `--include-noise-html`，会污染检索结果。
 
-## 6. 入库 metadata
+## 7. 入库 metadata
 
 新导入的文档会补充 metadata：
 
@@ -174,7 +195,7 @@ cd "D:\project\DDS\DDSRag - v2"
 
 注意：metadata 升级只影响新导入数据。旧库里已存在的 chunk 不会自动补齐 metadata。
 
-## 7. 检索流程
+## 8. 检索流程
 
 默认检索模式在 `config_data.py`：
 
@@ -229,7 +250,7 @@ default_retrieval_mode = "vector"
 -> 百炼 qwen3-max 生成答案
 ```
 
-## 8. 命令行检索对比
+## 9. 命令行检索对比
 
 可以直接用 `vector_stores.py` 对比检索效果。
 
@@ -247,7 +268,79 @@ default_retrieval_mode = "vector"
 
 注意：这两个命令都会调用 rerank，因此需要百炼 `qwen3-rerank` 可用。
 
-## 9. 问答启动方式
+## 10. 启动方式
+
+### 10.1 FastAPI + Vue（当前推荐入口）
+
+先确认 Ollama 已运行并已安装 embedding 模型：
+
+```powershell
+ollama serve
+ollama pull bge-m3
+```
+
+后端终端：
+
+```powershell
+cd "D:\project\DDS\DDSRag - v2"
+.\.venv\Scripts\Activate.ps1
+python -m uvicorn backend.main:app --reload --reload-exclude "data/*" --reload-exclude "chroma_db/*" --host 127.0.0.1 --port 8000
+```
+
+如果本地 `.venv` 解释器失效，请在项目目录重新创建环境后安装依赖：
+
+```powershell
+py -3.13 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+前端终端：
+
+```powershell
+cd "D:\project\DDS\DDSRag - v2\frontend"
+npm install
+npm run dev
+```
+
+浏览器访问：
+
+```text
+http://localhost:5173
+```
+
+### 10.2 旧 Streamlit 页面
+
+旧页面仍可用于单文件入库或快速调试，但不包含 Vue 页面中的完整登录体验：
+
+```powershell
+cd "D:\project\DDS\DDSRag - v2"
+.\.venv\Scripts\streamlit.exe run app_qa.py
+```
+
+## 11. FastAPI 接口认证
+
+除 `GET /api/health`、登录、退出登录外，业务接口都需要浏览器 Cookie 中的登录会话。前端请求已使用 `credentials: 'include'`。
+
+主要认证接口：
+
+```text
+POST /api/auth/login
+POST /api/auth/logout
+GET  /api/auth/me
+```
+
+管理员接口：
+
+```text
+POST /api/models/switch
+POST /api/upload
+POST /api/batch-ingest
+```
+
+后端依据 Cookie 对会话归属做校验，前端传入其他用户的 `session_id` 不会获得访问权限。
+
+## 12. 问答启动方式（Streamlit）
 
 启动问答前端：
 
@@ -275,7 +368,7 @@ app_qa.py
 - 在相关句末使用 `[n]` 标注引用编号。
 - 资料不足时明确说明资料不足。
 
-## 10. 引用格式
+## 13. 引用格式
 
 引用格式由 `citation.py` 生成。
 
@@ -297,7 +390,7 @@ HTML/API 示例：
 DataReader 用于读取订阅到的数据 [2]。
 ```
 
-## 11. 常见问题
+## 14. 常见问题
 
 ### 11.1 Ollama tokenize refused
 
@@ -368,7 +461,7 @@ Collection expecting embedding with dimension X, got Y
 
 当前 v2 仍使用固定目录 `chroma_db`，所以换模型前应明确备份和重建。
 
-## 12. 当前限制
+## 15. 当前限制
 
 - 当前没有专门的知识库清单查询接口。
 - 当前没有上下文相邻 chunk 扩展。
@@ -377,7 +470,7 @@ Collection expecting embedding with dimension X, got Y
 - 当前 `chunk_id` 是单文件内编号，跨文件稳定定位依赖 `source_chunk_id`。
 - 旧数据 metadata 不会自动迁移，需要重新导入或专门迁移脚本。
 
-## 13. 建议后续升级
+## 16. 建议后续升级
 
 建议按以下顺序继续：
 

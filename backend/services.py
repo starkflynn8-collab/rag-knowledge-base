@@ -23,6 +23,16 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 import config_data as config
+from auth_store import (
+    User,
+    clear_chat_history,
+    delete_chat_session,
+    ensure_chat_session,
+    get_chat_session,
+    init_db,
+    list_chat_sessions,
+    set_session_title,
+)
 from citation import format_citation, format_document_block, resolve_chunk_id
 from corpus_cleaner import infer_doc_type, iter_supported_files, load_html, normalize_source
 from document_loader import DocumentLoaderService
@@ -81,6 +91,7 @@ def normalize_html_source_path(source: Any) -> str:
 
 class AppServices:
     def __init__(self) -> None:
+        init_db()
         self.loader = DocumentLoaderService()
         self.kb = KnowledgeBaseService()
         self.rag = RagService()
@@ -364,13 +375,20 @@ class AppServices:
 
     def html_source_file(self, source_path: str) -> Path:
         """解析 HTML 原始文件，并限制访问范围在配置的 HTML 根目录内。"""
+        candidate = self.html_source_asset(source_path)
+        if candidate.suffix.lower() not in {".html", ".htm"}:
+            raise FileNotFoundError(f"原始 HTML 不存在：{source_path}")
+        return candidate
+
+    def html_source_asset(self, source_path: str) -> Path:
+        """解析 HTML 页面及其相对资源，并限制访问范围内。"""
         root = Path(config.html_source_root).expanduser().resolve()
         relative = Path(normalize_html_source_path(source_path).replace("\\", "/"))
         candidate = (root / relative).resolve()
         if root != candidate and root not in candidate.parents:
             raise FileNotFoundError("HTML 路径不在允许的文档目录内")
-        if candidate.suffix.lower() not in {".html", ".htm"} or not candidate.is_file():
-            raise FileNotFoundError(f"原始 HTML 不存在：{source_path}")
+        if not candidate.is_file():
+            raise FileNotFoundError(f"原始 HTML 资源不存在：{source_path}")
         return candidate
 
     #引用粒度分级方法
@@ -688,60 +706,30 @@ class AppServices:
 
         return payload
 
-    def clear_history(self, session_id: str) -> None:
-        history = get_history(session_id)
-        history.clear()
+    def ensure_session(self, user: User, session_id: str) -> None:
+        ensure_chat_session(user.id, session_id)
 
-    @property
-    def session_titles_path(self) -> Path:
-        return ROOT_DIR / "chat_history" / ".session_titles.json"
+    def clear_history(self, user: User, session_id: str) -> None:
+        clear_chat_history(user.id, session_id)
 
-    @staticmethod
-    def _validate_session_id(session_id: str) -> str:
-        value = str(session_id or "").strip()
-        if not value or Path(value).name != value or value in {".", ".."}:
-            raise ValueError("无效的会话 ID")
-        return value
-
-    def _read_session_titles(self) -> dict[str, str]:
-        try:
-            with self.session_titles_path.open("r", encoding="utf-8") as file:
-                data = json.load(file)
-            return data if isinstance(data, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
-            return {}
-
-    def _write_session_titles(self, titles: dict[str, str]) -> None:
-        self.session_titles_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.session_titles_path.open("w", encoding="utf-8") as file:
-            json.dump(titles, file, ensure_ascii=False, indent=2)
-
-    def update_session_title(self, session_id: str, title: str) -> dict[str, str]:
-        session_id = self._validate_session_id(session_id)
+    def update_session_title(self, user: User, session_id: str, title: str) -> dict[str, str]:
         normalized_title = re.sub(r"\s+", " ", str(title or "")).strip()
         if not normalized_title:
             raise ValueError("会话标题不能为空")
-        history_path = ROOT_DIR / "chat_history" / session_id
-        if not history_path.is_file():
-            history_path.parent.mkdir(parents=True, exist_ok=True)
-            history_path.write_text("[]", encoding="utf-8")
-        titles = self._read_session_titles()
-        titles[session_id] = normalized_title
-        self._write_session_titles(titles)
+        if len(normalized_title) > 80:
+            raise ValueError("会话标题不能超过 80 个字符")
+        ensure_chat_session(user.id, session_id, normalized_title)
+        set_session_title(user.id, session_id, normalized_title)
         return {"session_id": session_id, "title": normalized_title}
 
-    def delete_session(self, session_id: str) -> None:
-        session_id = self._validate_session_id(session_id)
-        history_path = ROOT_DIR / "chat_history" / session_id
-        if not history_path.is_file():
-            raise FileNotFoundError(f"会话不存在：{session_id}")
-        history_path.unlink()
-        titles = self._read_session_titles()
-        if session_id in titles:
-            del titles[session_id]
-            self._write_session_titles(titles)
+    def delete_session(self, user: User, session_id: str) -> None:
+        try:
+            delete_chat_session(user.id, session_id)
+        except FileNotFoundError:
+            return
 
-    def get_session_history(self, session_id: str) -> dict[str, Any]:
+    def get_session_history(self, user: User, session_id: str) -> dict[str, Any]:
+        get_chat_session(user.id, session_id)
         messages = []
         for message in get_history(session_id).messages:
             content = message.content
@@ -761,39 +749,6 @@ class AppServices:
             "messages": messages,
         }
 
-    def list_sessions(self) -> dict[str, Any]:
-        history_dir = ROOT_DIR / "chat_history"
-        titles = self._read_session_titles()
-        items = []
-        if not history_dir.exists():
-            return {"total": 0, "items": []}
-
-        for path in history_dir.iterdir():
-            if not path.is_file() or path.name.startswith("."):
-                continue
-            try:
-                messages = get_history(path.name).messages
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                continue
-            first_user_message = next(
-                (message for message in messages if message.type == "human"),
-                None,
-            )
-            title = titles.get(path.name) or (str(first_user_message.content).strip() if first_user_message else "新对话")
-            title = re.sub(r"\s+", " ", title)
-            if len(title) > 40:
-                title = f"{title[:40]}..."
-
-            updated_at = datetime.fromtimestamp(path.stat().st_mtime).isoformat()
-            items.append(
-                {
-                    "session_id": path.name,
-                    "title": title,
-                    "message_count": len(messages),
-                    "updated_at": updated_at,
-                }
-            )
-
-        items.sort(key=lambda item: item["updated_at"], reverse=True)
+    def list_sessions(self, user: User) -> dict[str, Any]:
+        items = list_chat_sessions(user.id)
         return {"total": len(items), "items": items}
-

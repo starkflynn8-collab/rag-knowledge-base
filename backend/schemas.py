@@ -5,10 +5,26 @@ from pydantic import BaseModel, Field
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1)
-    session_id: str = "user_001"
+    session_id: str | None = None
     retrieval_mode: Literal["hybrid", "vector"] = "hybrid"
     top_k: int = Field(default=5, ge=1, le=50)
     return_context: bool = True
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=80)
+    password: str = Field(min_length=1, max_length=200)
+
+
+class UserPermissionsUpdate(BaseModel):
+    enabled: bool | None = Field(default=None, strict=True)
+    can_upload: bool = Field(strict=True)
+    can_switch_models: bool = Field(strict=True)
+
+class RegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=80, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=6, max_length=200)
+    display_name: str = Field(default="", max_length=80)
 
 
 class RetrieveRequest(BaseModel):

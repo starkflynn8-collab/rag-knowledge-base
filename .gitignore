@@ -1,40 +1,56 @@
-# Python
+# Python / environments
 __pycache__/
 *.py[cod]
-*.pyo
-
-# Virtual env
 .venv/
 venv/
 env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
 
-# Environment
+# Secrets / local configuration
 .env
 .env.*
 !.env.example
-
-# IDE
-.idea/
-.vscode/
-
-# Streamlit
+!.env.*.example
 .streamlit/secrets.toml
+*.pem
+*.key
+*.p12
+*.pfx
 
-
-
-# Upload / temp / local data
+# Runtime data (matches nested directories too)
+chroma_db/
+data/
+chat_history/
 uploads/
 temp/
 tmp/
-data/
+md5.text
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
 
-# Frontend
-frontend/node_modules/
+# Frontend / generated output
+node_modules/
 frontend/dist/
+.vite/
+coverage/
+playwright-report/
+test-results/
 
-# OS
+# Editors / OS / logs
+.idea/
+.vscode/
 .DS_Store
 Thumbs.db
-
-# Logs
+Desktop.ini
 *.log
+```
