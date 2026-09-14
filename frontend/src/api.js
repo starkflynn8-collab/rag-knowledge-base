@@ -1,4 +1,5 @@
 import { apiErrorMessage } from './authErrors.js'
+import { buildBatchUpload } from './batchUpload.js'
 
 const defaultApiHost =
   typeof window !== 'undefined' ? window.location.hostname : '127.0.0.1'
@@ -12,11 +13,13 @@ async function request(path, options = {}) {
       ...(options.headers || {})
     },
     ...options
+  }).catch((cause) => {
+    throw Object.assign(new Error('服务暂未连接，可能正在启动，请稍候重试。'), { network: true, cause })
   })
   const data = await response.json().catch(() => null)
   if (!response.ok || !data?.success) {
     const detail = apiErrorMessage(data, response.statusText)
-    throw new Error(detail)
+    throw Object.assign(new Error(detail), { status: response.status })
   }
   return data.data
 }
@@ -38,7 +41,7 @@ export function logout() {
 }
 
 export function getCurrentUser() {
-  return request('/api/auth/me')
+  return request('/api/auth/me', { signal: AbortSignal.timeout(5000) })
 }
 
 export function listUsers() {
@@ -186,6 +189,10 @@ export function batchIngest(payload) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
   })
+}
+
+export function uploadDirectory(files, options) {
+  return request('/api/batch-upload', { method: 'POST', body: buildBatchUpload(files, options) })
 }
 
 export function listSessions() {

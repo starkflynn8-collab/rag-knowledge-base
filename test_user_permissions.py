@@ -36,6 +36,17 @@ class UserPermissionsTest(unittest.TestCase):
                 self.assertEqual(member.post('/api/batch-ingest', json={'path': 'test'}).status_code, 403)
                 self.assertEqual(admin.post('/api/auth/login', json={'username': 'admin', 'password': 'admin123'}).status_code, 200)
                 self.assertEqual(admin.get('/api/admin/users').status_code, 200)
+                from backend.main import services
+                with patch.object(services, 'batch_ingest', return_value={'success_count': 0}) as ingest:
+                    files = [('files', ('docs/a.txt', b'hello', 'text/plain'))]
+                    self.assertEqual(member.post('/api/batch-upload', files=files).status_code, 403)
+                    with tempfile.TemporaryDirectory() as upload_root, patch.object(store.config, 'PROJECT_ROOT', Path(upload_root)):
+                        response = admin.post('/api/batch-upload', files=files, data={'dry_run': 'true'})
+                        self.assertEqual(response.status_code, 200)
+                        self.assertTrue(ingest.call_args.args[2])
+                        ingest.reset_mock()
+                        self.assertEqual(admin.post('/api/batch-upload', files=[('files', ('../a.txt', b'x'))]).status_code, 400)
+                        ingest.assert_not_called()
                 new_account = {'username': 'created_by_admin', 'password': 'secret123', 'display_name': 'New user'}
                 self.assertEqual(member.post('/api/admin/users', json=new_account).status_code, 403)
                 created = admin.post('/api/admin/users', json=new_account)

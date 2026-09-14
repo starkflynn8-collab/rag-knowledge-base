@@ -5,6 +5,7 @@
       <div class="subtitle">南京臻融科技</div>
       <div class="auth-tabs" aria-label="账户操作"><button type="button" :disabled="loginBusy" :class="{active: authMode === 'login'}" @click="switchAuthMode('login')">登录</button><button type="button" :disabled="loginBusy" :class="{active: authMode === 'register'}" @click="switchAuthMode('register')">注册</button></div>
       <h1>{{ authMode === 'login' ? '欢迎登录' : '创建账号' }}</h1>
+      <div v-if="!backendReady" class="backend-startup" role="status" aria-live="polite">{{ backendWaiting ? '服务暂未连接，正在自动重试…' : '正在连接服务…' }}</div>
       <form class="login-form" @submit.prevent="authMode === 'login' ? handleLogin() : handleRegister()">
         <label>
           <span>用户名</span>
@@ -17,8 +18,8 @@
         </label>
         <label v-if="authMode === 'register'"><span>确认密码</span><input v-model="registerForm.confirm" autocomplete="new-password" type="password" placeholder="请再次输入密码" /></label>
         <div v-if="loginError" class="login-error" role="alert">{{ loginError }}</div>
-        <button class="primary-button login-button" type="submit" :disabled="loginBusy || !loginForm.username || !loginForm.password">
-          {{ loginBusy ? (authMode === 'login' ? '登录中...' : '注册中...') : (authMode === 'login' ? '登录' : '注册并登录') }}
+        <button class="primary-button login-button" type="submit" :disabled="!backendReady || loginBusy || !loginForm.username || !loginForm.password">
+          {{ !backendReady ? '等待服务就绪...' : loginBusy ? (authMode === 'login' ? '登录中...' : '注册中...') : (authMode === 'login' ? '登录' : '注册并登录') }}
         </button>
       </form>
       <div class="login-hint">南京臻融科技 版权所有</div>
@@ -268,7 +269,7 @@
               <input v-model="batchForm.dry_run" type="checkbox" />
               <span>Dry Run（仅预览扫描结果，不实际写入知识库）</span>
             </label>
-            <button class="primary-button" @click="handleBatchIngest" :disabled="busy">开始批量导入</button>
+            <button class="primary-button" @click="handleBatchIngest" :disabled="busy || !batchFiles.length">{{ busy ? '处理中...' : (batchForm.dry_run ? '扫描目录' : '开始批量导入') }}</button>
 
             <pre class="result">{{ uploadResult }}</pre>
           </div>
@@ -399,8 +400,9 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { probeSession } from './backendReadiness.js'
 import {
-  batchIngest,
+  uploadDirectory,
   chat,
   chatStream,
   clearHistory,
@@ -423,6 +425,37 @@ import {
 
 const tab = ref('chat')
 const authenticated = ref(false)
+const backendReady = ref(false)
+const backendWaiting = ref(false)
+let backendTimer
+let disposed = false
+
+async function checkBackend() {
+  clearTimeout(backendTimer)
+  if (disposed || authenticated.value) return
+  const result = await probeSession(getCurrentUser)
+  if (disposed) return
+  backendReady.value = result.ready
+  backendWaiting.value = !result.ready
+  if (!result.ready) {
+    backendTimer = setTimeout(checkBackend, 3000)
+    return
+  }
+  if (result.user) {
+    currentUser.value = result.user
+    authenticated.value = true
+    try { await loadUserApp() }
+    catch (err) { console.error('恢复登录后的页面加载失败', err) }
+  }
+}
+
+function reconnectOnError(err) {
+  if (!err.network && !(err.status >= 500)) return
+  backendReady.value = false
+  backendWaiting.value = true
+  clearTimeout(backendTimer)
+  backendTimer = setTimeout(checkBackend, 3000)
+}
 const currentUser = ref(null)
 const loginBusy = ref(false)
 const loginError = ref('')
@@ -478,6 +511,7 @@ const healthLabel = computed(() => {
 const prettyConfig = computed(() => JSON.stringify(configData, null, 2))
 const pickedFile = ref(null)
 const batchPathInput = ref(null)
+const batchFiles = ref([])
 const isAdmin = computed(() => currentUser.value?.role === 'admin')
 const canUpload = computed(() => isAdmin.value || currentUser.value?.can_upload)
 const canSwitchModels = computed(() => isAdmin.value || currentUser.value?.can_switch_models)
@@ -615,7 +649,7 @@ async function loadUserApp() {
 }
 
 async function handleLogin() {
-  if (loginBusy.value) return
+  if (loginBusy.value || !backendReady.value) return
   loginBusy.value = true
   loginError.value = ''
   try {
@@ -631,13 +665,14 @@ async function handleLogin() {
     authenticated.value = false
     currentUser.value = null
     loginError.value = err.message || '登录失败'
+    reconnectOnError(err)
   } finally {
     loginBusy.value = false
   }
 }
 
 async function handleRegister() {
-  if (loginBusy.value) return
+  if (loginBusy.value || !backendReady.value) return
   if (!/^[A-Za-z0-9_.-]{3,80}$/.test(loginForm.username)) { loginError.value = '用户名须为 3–80 位英文字母、数字、下划线、点或短横线'; return }
   if (loginForm.password.length < 6 || loginForm.password.length > 200) { loginError.value = '密码长度须为 6–200 位'; return }
   if (registerForm.displayName.length > 80) { loginError.value = '显示名称不能超过 80 位'; return }
@@ -647,7 +682,7 @@ async function handleRegister() {
     currentUser.value = await register(loginForm.username, loginForm.password, registerForm.displayName)
     authenticated.value = true; loginForm.password = ''; registerForm.confirm = ''
     await loadUserApp()
-  } catch (err) { loginError.value = err.message || '注册失败' }
+  } catch (err) { loginError.value = err.message || '注册失败'; reconnectOnError(err) }
   finally { loginBusy.value = false }
 }
 
@@ -662,6 +697,8 @@ async function handleLogout() {
     passwordVisible.value = false
     authMode.value = 'login'
     userAccounts.value = []
+    batchFiles.value = []
+    batchForm.path = ''
     createUserMessage.value = ''
     authenticated.value = false
     currentUser.value = null
@@ -914,10 +951,9 @@ function openBatchPathPicker() {
 }
 
 function onPickBatchPath(event) {
-  const file = event.target.files?.[0]
-  if (!file) return
-  const relativePath = file.webkitRelativePath || file.name
-  batchForm.path = file.path || relativePath.split('/')[0] || ''
+  batchFiles.value = Array.from(event.target.files || [])
+  const file = batchFiles.value[0]
+  batchForm.path = file ? `${(file.webkitRelativePath || file.name).split('/')[0]} · ${batchFiles.value.length} 个文件` : ''
 }
 
 async function handleUpload() {
@@ -935,9 +971,11 @@ async function handleUpload() {
 }
 
 async function handleBatchIngest() {
+  if (busy.value || !batchFiles.value.length) return
   busy.value = true
+  uploadResult.value = batchForm.dry_run ? '正在上传并扫描目录...' : '正在上传并导入目录...'
   try {
-    const res = await batchIngest(batchForm)
+    const res = await uploadDirectory(batchFiles.value, batchForm)
     uploadResult.value = JSON.stringify(res, null, 2)
     await loadDocuments()
   } catch (err) {
@@ -1105,23 +1143,12 @@ async function handleSend() {
 }
 
 onBeforeUnmount(() => {
+  disposed = true
+  clearTimeout(backendTimer)
   stopPreviewResize()
 })
 
-onMounted(async () => {
-  try {
-    currentUser.value = await getCurrentUser()
-    authenticated.value = true
-  } catch {
-    authenticated.value = false
-    return
-  }
-  try {
-    await loadUserApp()
-  } catch (err) {
-    console.error('恢复登录状态后的页面初始化失败：', err)
-  }
-})
+onMounted(checkBackend)
 </script>
 
 

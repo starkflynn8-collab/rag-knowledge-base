@@ -384,6 +384,9 @@ class AppServices:
         """解析 HTML 页面及其相对资源，并限制访问范围内。"""
         root = Path(config.html_source_root).expanduser().resolve()
         relative = Path(normalize_html_source_path(source_path).replace("\\", "/"))
+        if relative.parts and relative.parts[0] == '_uploads':
+            root = (Path(config.PROJECT_ROOT) / 'uploads' / 'batches').resolve()
+            relative = Path(*relative.parts[1:])
         candidate = (root / relative).resolve()
         if root != candidate and root not in candidate.parents:
             raise FileNotFoundError("HTML 路径不在允许的文档目录内")
@@ -615,7 +618,7 @@ class AppServices:
             "parsed_documents": len(documents),
         }
 
-    def batch_ingest(self, path: str, include_noise_html: bool = False, dry_run: bool = False, operator: str = "小虎") -> dict[str, Any]:
+    def batch_ingest(self, path: str, include_noise_html: bool = False, dry_run: bool = False, operator: str = "小虎", source_prefix: str = "") -> dict[str, Any]:
         input_path = Path(path).expanduser().resolve()
         if not input_path.exists():
             raise FileNotFoundError(f"路径不存在：{input_path}")
@@ -656,7 +659,7 @@ class AppServices:
             return payload
 
         for file_path, relative_path, _ in kept_files:
-            source = normalize_source(relative_path)
+            source = normalize_source(Path(source_prefix) / relative_path)
             try:
                 if file_path.suffix.lower() in {".html", ".htm"}:
                     documents = load_html(file_path)

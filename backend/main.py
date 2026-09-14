@@ -11,12 +11,15 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from starlette.datastructures import UploadFile as StarletteUploadFile
+from starlette.concurrency import run_in_threadpool
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from langchain_core.documents import Document as LCDocument
+from backend.batch_upload import ingest_uploaded_directory
 from auth_store import authenticate, create_auth_session, register_user, revoke_auth_session, user_payload
 from backend.auth import get_current_user, require_admin, require_upload, require_model_switch
 from auth_store import list_users, set_user_permissions
@@ -487,6 +490,23 @@ async def batch_ingest(payload: BatchIngestRequest, request: Request, user=Depen
         operator=user.display_name,
     )
     return JSONResponse(content=success_payload(data, message="批量导入完成", rid=rid))
+
+
+@app.post('/api/batch-upload')
+async def batch_upload(request: Request, user=Depends(require_upload)):
+    async with request.form(max_files=10000, max_fields=10) as form:
+        files = form.getlist('files')
+        if not files or any(not isinstance(item, StarletteUploadFile) for item in files):
+            raise HTTPException(status_code=400, detail='请选择目录文件')
+        flags = [form.get(name, 'false') for name in ('include_noise_html', 'dry_run')]
+        if any(value not in ('true', 'false') for value in flags):
+            raise HTTPException(status_code=400, detail='无效的批量导入选项')
+        try:
+            data = await run_in_threadpool(ingest_uploaded_directory, services, files,
+                                          flags[0] == 'true', flags[1] == 'true', user.display_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+    return success_payload(data, message='扫描完成' if flags[1] == 'true' else '批量导入完成')
 
 
 @app.get("/")
